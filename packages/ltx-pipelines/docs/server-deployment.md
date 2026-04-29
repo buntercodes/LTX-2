@@ -70,11 +70,13 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 source ~/.cargo/env
 
 # Install dependencies with server extras
-uv sync --extra server --extra xformers
+uv sync --extra server
 
 # Activate virtualenv
 source .venv/bin/activate
 ```
+
+> **Note:** `--extra xformers` is not included because it triggers a resolver conflict with `fp8-trtllm` (which pins `transformers==4.53.1` while we require `4.57.6`). The distilled pipeline does not require xformers to function.
 
 ### Option B: pip
 
@@ -82,7 +84,7 @@ source .venv/bin/activate
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip setuptools wheel
-pip install -e "packages/ltx-core[xformers]"
+pip install -e "packages/ltx-core"
 pip install -e "packages/ltx-pipelines[server]"
 ```
 
@@ -110,7 +112,7 @@ huggingface-cli download Lightricks/LTX-2.3 \
 
 # 3. Gemma text encoder (~24 GB total, all files)
 huggingface-cli download google/gemma-3-12b-it-qat-q4_0-unquantized \
-    --local-dir ~/models/gemma --local-dir-use-symlinks False
+    --local-dir ~/models/gemma --no-symlinks
 ```
 
 > **Tip:** Set `export HF_HUB_ENABLE_HF_TRANSFER=1` before downloading for faster transfers (requires `pip install huggingface-hub[hf-transfer]`).
@@ -292,8 +294,6 @@ else:
 | `--quantization fp8-cast` | FP8 weights | ~40% less VRAM, marginally faster |
 | `--offload none` | All weights on GPU | No streaming overhead |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | Mandatory for FP8 |
-| `xformers` extra | Installed | Memory-efficient attention |
-| `flash-attn` | Optional | Best for Hopper/Blackwell |
 
 With 96 GB VRAM, the bf16 model fits entirely without offloading. fp8-cast reduces VRAM to ~30 GB, leaving room for larger batches or concurrent requests.
 

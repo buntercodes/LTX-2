@@ -1,5 +1,7 @@
 import logging
 import tempfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import torch
@@ -114,19 +116,20 @@ class PipelineManager:
 
 
 def create_app(config: ServerConfig) -> FastAPI:
-    app = FastAPI(title="LTX-2 Video Generation API", version="1.0.0")
     manager = PipelineManager.get_instance()
 
-    @app.on_event("startup")
-    def _startup() -> None:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         manager.initialize(config)
+        yield
+
+    app = FastAPI(title="LTX-2 Video Generation API", version="1.0.0", lifespan=lifespan)
 
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "gpu_available": torch.cuda.is_available()}
 
     @app.post("/generate")
-    @torch.inference_mode()
     async def generate(req: GenerateRequest) -> FileResponse:
         if manager.pipeline is None:
             raise HTTPException(status_code=503, detail="Pipeline not ready")
@@ -155,17 +158,18 @@ def create_app(config: ServerConfig) -> FastAPI:
         )
 
         try:
-            video_iter, audio = manager.pipeline(
-                prompt=req.prompt,
-                seed=req.seed,
-                height=req.height,
-                width=req.width,
-                num_frames=req.num_frames,
-                frame_rate=req.frame_rate,
-                images=images,
-                tiling_config=tiling_config,
-                enhance_prompt=req.enhance_prompt,
-            )
+            with torch.inference_mode():
+                video_iter, audio = manager.pipeline(
+                    prompt=req.prompt,
+                    seed=req.seed,
+                    height=req.height,
+                    width=req.width,
+                    num_frames=req.num_frames,
+                    frame_rate=req.frame_rate,
+                    images=images,
+                    tiling_config=tiling_config,
+                    enhance_prompt=req.enhance_prompt,
+                )
         except Exception as exc:
             logger.exception("Generation failed")
             raise HTTPException(status_code=500, detail=f"Generation failed: {exc}") from exc
