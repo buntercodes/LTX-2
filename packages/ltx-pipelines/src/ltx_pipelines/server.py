@@ -12,6 +12,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
+from starlette.background import BackgroundTask
 
 from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
@@ -195,7 +196,7 @@ def create_app(config: ServerConfig) -> FastAPI:
             tmp_path,
             media_type="video/mp4",
             filename="generated.mp4",
-            background=lambda: Path(tmp_path).unlink(missing_ok=True),
+            background=BackgroundTask(Path(tmp_path).unlink, missing_ok=True),
         )
 
     @app.post("/txt2vid")
