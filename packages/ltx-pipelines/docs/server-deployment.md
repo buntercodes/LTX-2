@@ -212,6 +212,19 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 
 ## Step 6 — Using the API
 
+The API uses an asynchronous task model — you submit a generation job and poll for its status. This avoids timeouts and allows queuing multiple jobs.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Server health + queue depth |
+| `POST` | `/txt2vid` | Submit text-to-video job → returns `task_id` (202) |
+| `POST` | `/img2vid` | Submit image-to-video job → returns `task_id` (202) |
+| `GET` | `/task/{task_id}` | Poll task status |
+| `GET` | `/task/{task_id}/video` | Download completed video (404 if not ready) |
+| `GET` | `/queue` | List all tasks |
+
 ### Health Check
 
 ```bash
@@ -219,10 +232,12 @@ curl http://localhost:8000/health
 ```
 
 ```json
-{"status":"ok","gpu_available":true}
+{"status":"ok","gpu_available":true,"queue_depth":0}
 ```
 
 ### Text-to-Video
+
+**Step 1 — Submit:**
 
 ```bash
 curl -X POST http://localhost:8000/txt2vid \
@@ -234,14 +249,39 @@ curl -X POST http://localhost:8000/txt2vid \
         "width": 1920,
         "num_frames": 121,
         "frame_rate": 24.0
-    }' \
-    -o output.mp4
+    }'
+```
+
+Response (HTTP 202):
+```json
+{"task_id":"a1b2c3d4e5f67890abcdef1234567890","status":"queued","message":"Task submitted"}
+```
+
+**Step 2 — Poll until completed:**
+
+```bash
+TASK_ID="a1b2c3d4e5f67890abcdef1234567890"
+
+# Poll status
+curl http://localhost:8000/task/$TASK_ID
+```
+
+```json
+{"task_id":"a1b2c3d4...","status":"running","prompt":"A golden...","seed":42,...,"elapsed":null}
+
+{"task_id":"a1b2c3d4...","status":"completed","prompt":"A golden...","seed":42,...,"elapsed":43.2}
+```
+
+**Step 3 — Download video:**
+
+```bash
+curl -o output.mp4 http://localhost:8000/task/$TASK_ID/video
 ```
 
 ### Image-to-Video
 
 ```bash
-curl -X POST http://localhost:8000/img2vid \
+TASK_ID=$(curl -s -X POST http://localhost:8000/img2vid \
     -H "Content-Type: application/json" \
     -d '{
         "prompt": "A person walking through a futuristic city at night, neon reflections on wet pavement",
@@ -252,60 +292,60 @@ curl -X POST http://localhost:8000/img2vid \
         "frame_rate": 24.0,
         "enhance_prompt": true,
         "images": [
-            {
-                "path": "/root/images/first_frame.jpg",
-                "frame_idx": 0,
-                "strength": 0.8
-            }
+            {"path": "/root/images/first_frame.jpg", "frame_idx": 0, "strength": 0.8}
         ]
-    }' \
-    -o output.mp4
+    }' | python3 -c "import sys,json; print(json.load(sys.stdin)['task_id'])")
+
+# Poll
+while true; do
+    STATUS=$(curl -s http://localhost:8000/task/$TASK_ID | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+    echo "Status: $STATUS"
+    [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ] && break
+    sleep 5
+done
+
+# Download
+curl -o output.mp4 http://localhost:8000/task/$TASK_ID/video
 ```
 
 ### Python client
 
 ```python
+import json, sys, time
 import requests
 
-# Text-to-Video
-response = requests.post(
-    "http://<SERVER_IP>:8000/txt2vid",
-    json={
-        "prompt": "A majestic eagle soaring over snow-capped mountain peaks, clouds drifting below, epic cinematic shot",
-        "seed": 42,
-        "height": 1088,
-        "width": 1920,
-        "num_frames": 121,
-        "frame_rate": 24.0,
-    },
-    timeout=600,
-)
+BASE = "http://<SERVER_IP>:8000"
 
-if response.status_code == 200:
+# Submit
+resp = requests.post(f"{BASE}/txt2vid", json={
+    "prompt": "A majestic eagle soaring over snow-capped mountain peaks",
+    "seed": 42,
+    "height": 1088,
+    "width": 1920,
+    "num_frames": 121,
+    "frame_rate": 24.0,
+}, timeout=10)
+resp.raise_for_status()
+task = resp.json()
+task_id = task["task_id"]
+print(f"Task {task_id} submitted: {task['status']}")
+
+# Poll
+while True:
+    status = requests.get(f"{BASE}/task/{task_id}", timeout=10).json()
+    print(f"  {status['status']}  elapsed={status.get('elapsed')}")
+    if status["status"] in ("completed", "failed"):
+        break
+    time.sleep(3)
+
+if status["status"] == "completed":
+    video = requests.get(f"{BASE}/task/{task_id}/video", timeout=60)
     with open("generated.mp4", "wb") as f:
-        f.write(response.content)
-else:
-    print(f"Error {response.status_code}: {response.json()}")
-```
-
-```python
-# Image-to-Video
-response = requests.post(
-    "http://<SERVER_IP>:8000/img2vid",
-    json={
-        "prompt": "Cinematic drone shot revealing the landscape, smooth camera motion",
-        "seed": 42,
-        "height": 1088,
-        "width": 1920,
-        "num_frames": 121,
-        "frame_rate": 24.0,
-        "images": [
-            {"path": "/root/images/keyframe_000.jpg", "frame_idx": 0, "strength": 0.9},
-            {"path": "/root/images/keyframe_120.jpg", "frame_idx": 120, "strength": 0.7},
-        ],
-    },
-    timeout=600,
-)
+        f.write(video.content)
+    print(f"Video saved ({len(video.content)} bytes)")
+elif status["status"] == "failed":
+    print(f"Task failed: {status.get('error')}", file=sys.stderr)
+    sys.exit(1)
 ```
 
 ---

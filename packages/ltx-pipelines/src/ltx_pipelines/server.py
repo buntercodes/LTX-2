@@ -1,16 +1,23 @@
 import logging
 import os
 import tempfile
+import threading
+import time
+import uuid
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
+from typing import ClassVar
 
 os.environ.setdefault("DISABLE_FLASH_ATTN", "1")
 os.environ.setdefault("XFORMERS_DISABLED", "1")
 
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.background import BackgroundTask
 
@@ -24,6 +31,11 @@ from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.types import OffloadMode
 
 logger = logging.getLogger("ltx_server")
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
 
 
 class ImageConditioning(BaseModel):
@@ -61,6 +73,12 @@ class Img2VidRequest(GenerateRequestBase):
     images: list[ImageConditioning] = Field(..., min_length=1, description="One or more conditioning images")
 
 
+class SubmitResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
+
+
 class ServerConfig(BaseModel):
     distilled_checkpoint_path: str
     gemma_root: str
@@ -69,6 +87,11 @@ class ServerConfig(BaseModel):
     offload_mode: OffloadMode = OffloadMode.NONE
     torch_compile: bool = False
     loras: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _build_quantization(policy_name: str | None) -> QuantizationPolicy | None:
@@ -91,6 +114,11 @@ def _build_loras(loras: list[str]) -> list[LoraPathStrengthAndSDOps]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Pipeline singleton
+# ---------------------------------------------------------------------------
+
+
 class PipelineManager:
     _instance: "PipelineManager | None" = None
 
@@ -108,7 +136,7 @@ class PipelineManager:
         if self._pipeline is not None:
             return
         self._config = config
-        logger.info("Loading DistilledPipeline...")
+        logger.info("Loading DistilledPipeline ...")
         self._pipeline = DistilledPipeline(
             distilled_checkpoint_path=config.distilled_checkpoint_path,
             gemma_root=config.gemma_root,
@@ -118,7 +146,7 @@ class PipelineManager:
             torch_compile=config.torch_compile,
             offload_mode=config.offload_mode,
         )
-        logger.info("Pipeline loaded successfully.")
+        logger.info("Pipeline loaded.")
 
     @property
     def pipeline(self) -> DistilledPipeline:
@@ -127,96 +155,272 @@ class PipelineManager:
         return self._pipeline
 
 
-def create_app(config: ServerConfig) -> FastAPI:
-    manager = PipelineManager.get_instance()
+# ---------------------------------------------------------------------------
+# Task system
+# ---------------------------------------------------------------------------
 
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        manager.initialize(config)
-        yield
 
-    app = FastAPI(title="LTX-2 Video Generation API", version="1.0.0", lifespan=lifespan)
+class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
-    @app.get("/health")
-    async def health() -> dict:
-        return {"status": "ok", "gpu_available": torch.cuda.is_available()}
 
-    async def _generate(req: GenerateRequestBase, images: list[ImageConditioningInput]) -> FileResponse:
+@dataclass
+class Task:
+    task_id: str
+    status: TaskStatus = TaskStatus.QUEUED
+    req: GenerateRequestBase | None = None
+    images: list[ImageConditioningInput] = field(default_factory=list)
+    video_path: str | None = None
+    error: str | None = None
+    created_at: float = field(default_factory=time.time)
+    started_at: float | None = None
+    finished_at: float | None = None
+    elapsed: float | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "status": self.status.value,
+            "prompt": self.req.prompt if self.req else None,
+            "seed": self.req.seed if self.req else None,
+            "height": self.req.height if self.req else None,
+            "width": self.req.width if self.req else None,
+            "num_frames": self.req.num_frames if self.req else None,
+            "frame_rate": self.req.frame_rate if self.req else None,
+            "image_count": len(self.images),
+            "error": self.error,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "elapsed": self.elapsed,
+        }
+
+
+class TaskManager:
+    MAX_QUEUE_SIZE: ClassVar[int] = 100
+    MAX_HISTORY: ClassVar[int] = 200
+
+    def __init__(self, pipeline: DistilledPipeline) -> None:
+        self._pipeline = pipeline
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._queue: deque[Task] = deque()
+        self._tasks: dict[str, Task] = {}
+        self._output_dir = Path(tempfile.mkdtemp(prefix="ltx_tasks_"))
+        self._running = True
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+        logger.info("Task output dir: %s", self._output_dir)
+
+    # -- submission ----------------------------------------------------------
+
+    def submit(self, req: GenerateRequestBase, images: list[ImageConditioningInput]) -> str:
+        task_id = uuid.uuid4().hex
+        task = Task(task_id=task_id, req=req, images=images)
+        with self._lock:
+            if len(self._tasks) >= self.MAX_HISTORY:
+                oldest = min(self._tasks.values(), key=lambda t: t.created_at)
+                self._cleanup_task(oldest, remove_from_dict=True)
+            self._tasks[task_id] = task
+            if len(self._queue) >= self.MAX_QUEUE_SIZE:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many queued tasks. Try again later.",
+                )
+            self._queue.append(task)
+            self._condition.notify()
+        logger.info("Task %s queued (queue depth %d)", task_id, len(self._queue))
+        return task_id
+
+    # -- query ---------------------------------------------------------------
+
+    def get(self, task_id: str) -> Task:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+            return task
+
+    def list_all(self) -> list[dict]:
+        with self._lock:
+            return [t.to_dict() for t in sorted(self._tasks.values(), key=lambda t: t.created_at)]
+
+    # -- worker --------------------------------------------------------------
+
+    def _worker_loop(self) -> None:
+        while self._running:
+            with self._lock:
+                while not self._queue and self._running:
+                    self._condition.wait(timeout=5)
+                if not self._running:
+                    return
+                task = self._queue.popleft()
+
+            self._run_task(task)
+
+    def _run_task(self, task: Task) -> None:
+        req = task.req
+        assert req is not None
+
+        task.status = TaskStatus.RUNNING
+        task.started_at = time.time()
+        logger.info("Task %s started (prompt='%s...')", task.task_id, req.prompt[:80])
+
         tiling_config = TilingConfig.default()
         video_chunks_number = get_video_chunks_number(req.num_frames, tiling_config)
 
-        logger.info(
-            "Generating: prompt='%s...', seed=%d, %dx%d, frames=%d, fps=%.1f, images=%d",
-            req.prompt[:80],
-            req.seed,
-            req.width,
-            req.height,
-            req.num_frames,
-            req.frame_rate,
-            len(images),
-        )
-
         try:
             with torch.inference_mode():
-                video_iter, audio = manager.pipeline(
+                video_iter, audio = self._pipeline(
                     prompt=req.prompt,
                     seed=req.seed,
                     height=req.height,
                     width=req.width,
                     num_frames=req.num_frames,
                     frame_rate=req.frame_rate,
-                    images=images,
+                    images=task.images,
                     tiling_config=tiling_config,
                     enhance_prompt=req.enhance_prompt,
                 )
-        except Exception as exc:
-            logger.exception("Generation failed")
-            raise HTTPException(status_code=500, detail=f"Generation failed: {exc}") from exc
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-        tmp_path = tmp.name
-        tmp.close()
+            video_path = str(self._output_dir / f"{task.task_id}.mp4")
 
-        try:
             with torch.inference_mode():
                 encode_video(
                     video=video_iter,
                     fps=req.frame_rate,
                     audio=audio,
-                    output_path=tmp_path,
+                    output_path=video_path,
                     video_chunks_number=video_chunks_number,
                 )
-        except Exception as exc:
-            Path(tmp_path).unlink(missing_ok=True)
-            logger.exception("Video encoding failed")
-            raise HTTPException(status_code=500, detail=f"Encoding failed: {exc}") from exc
 
-        logger.info("Generation complete, returning video.")
+            task.status = TaskStatus.COMPLETED
+            task.video_path = video_path
+            task.finished_at = time.time()
+            task.elapsed = round(task.finished_at - task.started_at, 1)
+            logger.info("Task %s completed in %.1fs", task.task_id, task.elapsed)
+
+        except Exception as exc:
+            task.status = TaskStatus.FAILED
+            task.error = str(exc)
+            task.finished_at = time.time()
+            task.elapsed = round(task.finished_at - task.started_at, 1)
+            logger.exception("Task %s failed in %.1fs", task.task_id, task.elapsed)
+
+    # -- cleanup -------------------------------------------------------------
+
+    def _cleanup_task(self, task: Task, *, remove_from_dict: bool = False) -> None:
+        if task.video_path is not None:
+            Path(task.video_path).unlink(missing_ok=True)
+            task.video_path = None
+        if remove_from_dict:
+            self._tasks.pop(task.task_id, None)
+
+    def shutdown(self) -> None:
+        self._running = False
+        with self._lock:
+            self._condition.notify_all()
+        self._worker.join(timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI application
+# ---------------------------------------------------------------------------
+
+
+def create_app(config: ServerConfig) -> FastAPI:
+    pipeline_mgr = PipelineManager.get_instance()
+    task_mgr: TaskManager | None = None
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        nonlocal task_mgr
+        pipeline_mgr.initialize(config)
+        task_mgr = TaskManager(pipeline_mgr.pipeline)
+        logger.info("Server ready.")
+        yield
+        if task_mgr is not None:
+            task_mgr.shutdown()
+        logger.info("Server shutdown complete.")
+
+    app = FastAPI(title="LTX-2 Video Generation API", version="2.0.0", lifespan=lifespan)
+
+    # -- Health --------------------------------------------------------------
+
+    @app.get("/health")
+    async def health() -> dict:
+        return {
+            "status": "ok",
+            "gpu_available": torch.cuda.is_available(),
+            "queue_depth": len(task_mgr._queue) if task_mgr else 0,
+        }
+
+    # -- Submit --------------------------------------------------------------
+
+    def _to_image_inputs(imgs: list[ImageConditioning]) -> list[ImageConditioningInput]:
+        return [
+            ImageConditioningInput(path=i.path, frame_idx=i.frame_idx, strength=i.strength, crf=i.crf)
+            for i in imgs
+        ]
+
+    @app.post("/txt2vid", response_model=SubmitResponse, status_code=202)
+    async def txt2vid(req: Txt2VidRequest) -> dict:
+        if task_mgr is None:
+            raise HTTPException(503, "Server not ready")
+        task_id = task_mgr.submit(req, images=[])
+        return {"task_id": task_id, "status": "queued", "message": "Task submitted"}
+
+    @app.post("/img2vid", response_model=SubmitResponse, status_code=202)
+    async def img2vid(req: Img2VidRequest) -> dict:
+        if task_mgr is None:
+            raise HTTPException(503, "Server not ready")
+        task_id = task_mgr.submit(req, images=_to_image_inputs(req.images))
+        return {"task_id": task_id, "status": "queued", "message": "Task submitted"}
+
+    # -- Query ---------------------------------------------------------------
+
+    @app.get("/task/{task_id}")
+    async def task_status(task_id: str) -> dict:
+        if task_mgr is None:
+            raise HTTPException(503, "Server not ready")
+        return task_mgr.get(task_id).to_dict()
+
+    @app.get("/task/{task_id}/video")
+    async def task_video(task_id: str) -> FileResponse:
+        if task_mgr is None:
+            raise HTTPException(503, "Server not ready")
+        task = task_mgr.get(task_id)
+        if task.status != TaskStatus.COMPLETED or task.video_path is None:
+            status_code = 404 if task.status != TaskStatus.COMPLETED else 425
+            detail = "Video not ready" if task.status != TaskStatus.COMPLETED else "Video file missing"
+            if task.status == TaskStatus.FAILED:
+                detail = f"Task failed: {task.error}"
+            raise HTTPException(status_code, detail=detail)
         return FileResponse(
-            tmp_path,
+            task.video_path,
             media_type="video/mp4",
-            filename="generated.mp4",
-            background=BackgroundTask(Path(tmp_path).unlink, missing_ok=True),
+            filename=f"generated_{task_id[:8]}.mp4",
         )
 
-    @app.post("/txt2vid")
-    async def txt2vid(req: Txt2VidRequest) -> FileResponse:
-        return await _generate(req, images=[])
+    @app.get("/queue")
+    async def queue_list() -> list[dict]:
+        if task_mgr is None:
+            raise HTTPException(503, "Server not ready")
+        return task_mgr.list_all()
 
-    @app.post("/img2vid")
-    async def img2vid(req: Img2VidRequest) -> FileResponse:
-        images = [
-            ImageConditioningInput(
-                path=img.path,
-                frame_idx=img.frame_idx,
-                strength=img.strength,
-                crf=img.crf,
-            )
-            for img in req.images
-        ]
-        return await _generate(req, images=images)
+    def _shutdown() -> None:
+        if task_mgr is not None:
+            task_mgr.shutdown()
 
     return app
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 
 def run_server(config: ServerConfig, host: str = "0.0.0.0", port: int = 8000) -> None:
@@ -230,7 +434,7 @@ def _banner() -> None:
     print(
         "\n"
         "  ╔══════════════════════════════════════════════════════╗\n"
-        "  ║              LTX-2 Video Generation API              ║\n"
+        "  ║           LTX-2 Video Generation API v2             ║\n"
         "  ╚══════════════════════════════════════════════════════╝\n"
     )
 
