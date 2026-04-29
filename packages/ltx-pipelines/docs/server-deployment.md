@@ -210,6 +210,44 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 
 ---
 
+## Step 5b — Cloud Storage (optional, for fast downloads)
+
+GPU instances typically have limited upload bandwidth. Upload generated videos to S3-compatible cloud storage and serve via pre-signed URLs. The client download then comes from the cloud CDN instead of the GPU instance.
+
+### Cloudflare R2 (recommended — zero egress fees)
+
+1. Create a free [Cloudflare R2](https://developers.cloudflare.com/r2/) account
+2. Create a bucket (e.g. `ltx-videos`)
+3. Generate an API token with **Object Read & Write** permissions
+4. Set environment variables:
+
+```bash
+export S3_ENDPOINT="https://<account_id>.r2.cloudflarestorage.com"
+export S3_BUCKET="ltx-videos"
+export S3_REGION="auto"
+export S3_ACCESS_KEY="<token_id>"
+export S3_SECRET_KEY="<token_secret>"
+export S3_URL_EXPIRES=3600    # URL lifetime in seconds (default 1 hour)
+```
+
+### AWS S3
+
+```bash
+export S3_ENDPOINT="https://s3.us-east-1.amazonaws.com"
+export S3_BUCKET="ltx-videos"
+export S3_REGION="us-east-1"
+export S3_ACCESS_KEY="AKIA..."
+export S3_SECRET_KEY="..."
+```
+
+> **Note:** With R2 you pay zero egress. With S3 you pay $0.09/GB egress.
+
+When cloud storage is configured, the server uploads each completed task's video and returns a 302 redirect to a pre-signed URL on `GET /task/{id}/video`. If cloud storage is not configured, the server falls back to serving the video directly from the local filesystem.
+
+Add these to `~/.bashrc` and the systemd service `Environment=` section so they persist across restarts.
+
+---
+
 ## Step 6 — Using the API
 
 The API uses an asynchronous task model — you submit a generation job and poll for its status. This avoids timeouts and allows queuing multiple jobs.

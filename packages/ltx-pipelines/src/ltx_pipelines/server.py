@@ -17,7 +17,7 @@ os.environ.setdefault("XFORMERS_DISABLED", "1")
 
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
 from starlette.background import BackgroundTask
 
@@ -115,6 +115,69 @@ def _build_loras(loras: list[str]) -> list[LoraPathStrengthAndSDOps]:
 
 
 # ---------------------------------------------------------------------------
+# S3 / R2 cloud storage (optional)
+# ---------------------------------------------------------------------------
+
+
+class CloudStorage:
+    """Upload generated videos to S3-compatible storage and serve via pre-signed URLs.
+
+    Configure via environment variables:
+
+    - ``S3_ENDPOINT`` — e.g. ``https://<account>.r2.cloudflarestorage.com``
+    - ``S3_BUCKET`` — bucket name
+    - ``S3_REGION`` — ``auto`` for R2, ``us-east-1`` for AWS
+    - ``S3_ACCESS_KEY``
+    - ``S3_SECRET_KEY``
+    - ``S3_URL_EXPIRES`` — pre-signed URL lifetime in seconds (default 3600)
+    """
+
+    def __init__(self) -> None:
+        self._client = None
+        self._bucket: str | None = None
+        self._endpoint: str | None = None
+        try:
+            self._endpoint = os.environ["S3_ENDPOINT"]
+            self._bucket = os.environ["S3_BUCKET"]
+            region = os.environ.get("S3_REGION", "auto")
+            import boto3
+
+            self._client = boto3.client(
+                "s3",
+                endpoint_url=self._endpoint,
+                region_name=region,
+                aws_access_key_id=os.environ["S3_ACCESS_KEY"],
+                aws_secret_access_key=os.environ["S3_SECRET_KEY"],
+            )
+            logger.info("Cloud storage enabled: %s/%s", self._endpoint, self._bucket)
+        except KeyError:
+            logger.info("Cloud storage not configured (S3_ENDPOINT / S3_BUCKET not set). Serving locally.")
+
+    @property
+    def configured(self) -> bool:
+        return self._client is not None
+
+    def upload(self, local_path: str, key: str) -> str:
+        assert self._client is not None and self._bucket is not None
+        self._client.upload_file(local_path, self._bucket, key)
+        expires = int(os.environ.get("S3_URL_EXPIRES", "3600"))
+        url = self._client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self._bucket, "Key": key},
+            ExpiresIn=expires,
+        )
+        logger.info("Uploaded %s → %s/%s", local_path, self._bucket, key)
+        return url
+
+    def delete(self, key: str) -> None:
+        assert self._client is not None and self._bucket is not None
+        try:
+            self._client.delete_object(Bucket=self._bucket, Key=key)
+        except Exception:
+            logger.warning("Failed to delete cloud key %s", key, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Pipeline singleton
 # ---------------------------------------------------------------------------
 
@@ -174,6 +237,8 @@ class Task:
     req: GenerateRequestBase | None = None
     images: list[ImageConditioningInput] = field(default_factory=list)
     video_path: str | None = None
+    cloud_key: str | None = None
+    cloud_url: str | None = None
     error: str | None = None
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
@@ -203,8 +268,9 @@ class TaskManager:
     MAX_QUEUE_SIZE: ClassVar[int] = 100
     MAX_HISTORY: ClassVar[int] = 200
 
-    def __init__(self, pipeline: DistilledPipeline) -> None:
+    def __init__(self, pipeline: DistilledPipeline, cloud: CloudStorage | None = None) -> None:
         self._pipeline = pipeline
+        self._cloud = cloud
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._queue: deque[Task] = deque()
@@ -303,6 +369,15 @@ class TaskManager:
             task.elapsed = round(task.finished_at - task.started_at, 1)
             logger.info("Task %s completed in %.1fs", task.task_id, task.elapsed)
 
+            if self._cloud and self._cloud.configured:
+                try:
+                    task.cloud_key = f"videos/{task.task_id}.mp4"
+                    task.cloud_url = self._cloud.upload(video_path, task.cloud_key)
+                    Path(video_path).unlink(missing_ok=True)
+                    task.video_path = None
+                except Exception as exc:
+                    logger.warning("Cloud upload failed (serving locally): %s", exc)
+
         except Exception as exc:
             task.status = TaskStatus.FAILED
             task.error = str(exc)
@@ -339,7 +414,8 @@ def create_app(config: ServerConfig) -> FastAPI:
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         nonlocal task_mgr
         pipeline_mgr.initialize(config)
-        task_mgr = TaskManager(pipeline_mgr.pipeline)
+        cloud = CloudStorage()
+        task_mgr = TaskManager(pipeline_mgr.pipeline, cloud=cloud)
         logger.info("Server ready.")
         yield
         if task_mgr is not None:
@@ -389,16 +465,16 @@ def create_app(config: ServerConfig) -> FastAPI:
         return task_mgr.get(task_id).to_dict()
 
     @app.get("/task/{task_id}/video")
-    async def task_video(task_id: str) -> FileResponse:
+    async def task_video(task_id: str) -> FileResponse | RedirectResponse:
         if task_mgr is None:
             raise HTTPException(503, "Server not ready")
         task = task_mgr.get(task_id)
-        if task.status != TaskStatus.COMPLETED or task.video_path is None:
-            status_code = 404 if task.status != TaskStatus.COMPLETED else 425
-            detail = "Video not ready" if task.status != TaskStatus.COMPLETED else "Video file missing"
-            if task.status == TaskStatus.FAILED:
-                detail = f"Task failed: {task.error}"
-            raise HTTPException(status_code, detail=detail)
+        if task.status == TaskStatus.FAILED:
+            raise HTTPException(410, f"Task failed: {task.error}")
+        if task.cloud_url:
+            return RedirectResponse(task.cloud_url, status_code=302)
+        if task.video_path is None:
+            raise HTTPException(425, "Video not ready yet")
         return FileResponse(
             task.video_path,
             media_type="video/mp4",
