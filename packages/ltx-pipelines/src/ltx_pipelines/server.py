@@ -115,43 +115,75 @@ def _build_loras(loras: list[str]) -> list[LoraPathStrengthAndSDOps]:
 
 
 # ---------------------------------------------------------------------------
-# S3 / R2 cloud storage (optional)
+# Cloudflare R2 cloud storage (optional)
 # ---------------------------------------------------------------------------
+
+_R2_ENV_VARS = {
+    "endpoint": "R2_ENDPOINT",
+    "bucket": "R2_BUCKET",
+    "region": "R2_REGION",
+    "access_key": "R2_ACCESS_KEY",
+    "secret_key": "R2_SECRET_KEY",
+    "url_expires": "R2_URL_EXPIRES",
+}
 
 
 class CloudStorage:
-    """Upload generated videos to S3-compatible storage and serve via pre-signed URLs.
+    """Upload generated videos to Cloudflare R2 and serve via pre-signed URLs.
 
     Configure via environment variables:
 
-    - ``S3_ENDPOINT`` — e.g. ``https://<account>.r2.cloudflarestorage.com``
-    - ``S3_BUCKET`` — bucket name
-    - ``S3_REGION`` — ``auto`` for R2, ``us-east-1`` for AWS
-    - ``S3_ACCESS_KEY``
-    - ``S3_SECRET_KEY``
-    - ``S3_URL_EXPIRES`` — pre-signed URL lifetime in seconds (default 3600)
+    - ``R2_ENDPOINT`` — e.g. ``https://<account_id>.r2.cloudflarestorage.com``
+    - ``R2_BUCKET``    — bucket name (e.g. ``ltx-videos``)
+    - ``R2_REGION``    — ``auto`` (required for R2)
+    - ``R2_ACCESS_KEY``
+    - ``R2_SECRET_KEY``
+    - ``R2_URL_EXPIRES`` — pre-signed URL lifetime in seconds (default 3600)
     """
 
     def __init__(self) -> None:
         self._client = None
         self._bucket: str | None = None
         self._endpoint: str | None = None
+
         try:
-            self._endpoint = os.environ["S3_ENDPOINT"]
-            self._bucket = os.environ["S3_BUCKET"]
-            region = os.environ.get("S3_REGION", "auto")
+            self._endpoint = os.environ[_R2_ENV_VARS["endpoint"]]
+            self._bucket = os.environ[_R2_ENV_VARS["bucket"]]
+        except KeyError:
+            logger.info(
+                "Storage mode: LOCAL (R2_ENDPOINT / R2_BUCKET not set). "
+                "Videos served directly from this instance."
+            )
+            return
+
+        try:
             import boto3
 
             self._client = boto3.client(
                 "s3",
                 endpoint_url=self._endpoint,
-                region_name=region,
-                aws_access_key_id=os.environ["S3_ACCESS_KEY"],
-                aws_secret_access_key=os.environ["S3_SECRET_KEY"],
+                region_name=os.environ.get(_R2_ENV_VARS["region"], "auto"),
+                aws_access_key_id=os.environ[_R2_ENV_VARS["access_key"]],
+                aws_secret_access_key=os.environ[_R2_ENV_VARS["secret_key"]],
             )
-            logger.info("Cloud storage enabled: %s/%s", self._endpoint, self._bucket)
-        except KeyError:
-            logger.info("Cloud storage not configured (S3_ENDPOINT / S3_BUCKET not set). Serving locally.")
+            logger.info(
+                "Storage mode: R2 (endpoint=%s, bucket=%s). "
+                "Videos uploaded to Cloudflare R2; downloads served via pre-signed URL.",
+                self._endpoint,
+                self._bucket,
+            )
+        except KeyError as exc:
+            logger.warning(
+                "Storage mode: LOCAL (R2 env vars incomplete — missing %s). "
+                "Set R2_ACCESS_KEY and R2_SECRET_KEY to enable cloud storage.",
+                exc.args[0] if exc.args else "key",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Storage mode: LOCAL (failed to init R2 client: %s). "
+                "Check R2_ENDPOINT, R2_ACCESS_KEY, and R2_SECRET_KEY.",
+                exc,
+            )
 
     @property
     def configured(self) -> bool:
@@ -160,7 +192,7 @@ class CloudStorage:
     def upload(self, local_path: str, key: str) -> str:
         assert self._client is not None and self._bucket is not None
         self._client.upload_file(local_path, self._bucket, key)
-        expires = int(os.environ.get("S3_URL_EXPIRES", "3600"))
+        expires = int(os.environ.get(_R2_ENV_VARS["url_expires"], "3600"))
         url = self._client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self._bucket, "Key": key},
@@ -271,6 +303,7 @@ class TaskManager:
     def __init__(self, pipeline: DistilledPipeline, cloud: CloudStorage | None = None) -> None:
         self._pipeline = pipeline
         self._cloud = cloud
+        self._storage_mode = "r2" if (cloud and cloud.configured) else "local"
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._queue: deque[Task] = deque()
@@ -431,6 +464,7 @@ def create_app(config: ServerConfig) -> FastAPI:
         return {
             "status": "ok",
             "gpu_available": torch.cuda.is_available(),
+            "storage_mode": task_mgr._storage_mode if task_mgr else "unknown",
             "queue_depth": len(task_mgr._queue) if task_mgr else 0,
         }
 

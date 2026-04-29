@@ -210,41 +210,51 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 
 ---
 
-## Step 5b — Cloud Storage (optional, for fast downloads)
+## Step 5b — Cloudflare R2 Storage (optional, for fast downloads)
 
-GPU instances typically have limited upload bandwidth. Upload generated videos to S3-compatible cloud storage and serve via pre-signed URLs. The client download then comes from the cloud CDN instead of the GPU instance.
+GPU instances typically have limited upload bandwidth. With R2, the server uploads each completed video to Cloudflare's global CDN once, and clients download via a pre-signed URL at full CDN speed instead of pulling from the GPU instance directly.
 
-### Cloudflare R2 (recommended — zero egress fees)
+### Setup
 
 1. Create a free [Cloudflare R2](https://developers.cloudflare.com/r2/) account
 2. Create a bucket (e.g. `ltx-videos`)
 3. Generate an API token with **Object Read & Write** permissions
-4. Set environment variables:
+4. Set environment variables before starting the server:
 
 ```bash
-export S3_ENDPOINT="https://<account_id>.r2.cloudflarestorage.com"
-export S3_BUCKET="ltx-videos"
-export S3_REGION="auto"
-export S3_ACCESS_KEY="<token_id>"
-export S3_SECRET_KEY="<token_secret>"
-export S3_URL_EXPIRES=3600    # URL lifetime in seconds (default 1 hour)
+export R2_ENDPOINT="https://<account_id>.r2.cloudflarestorage.com"
+export R2_BUCKET="ltx-videos"
+export R2_REGION="auto"
+export R2_ACCESS_KEY="<token_id>"
+export R2_SECRET_KEY="<token_secret>"
+export R2_URL_EXPIRES="3600"    # pre-signed URL lifetime in seconds (default 1 hour)
 ```
 
-### AWS S3
+5. Start the server — watch startup logs for the storage mode:
 
-```bash
-export S3_ENDPOINT="https://s3.us-east-1.amazonaws.com"
-export S3_BUCKET="ltx-videos"
-export S3_REGION="us-east-1"
-export S3_ACCESS_KEY="AKIA..."
-export S3_SECRET_KEY="..."
+```
+Storage mode: R2 (endpoint=https://xxx.r2.cloudflarestorage.com, bucket=ltx-videos).
+             Videos uploaded to Cloudflare R2; downloads served via pre-signed URL.
 ```
 
-> **Note:** With R2 you pay zero egress. With S3 you pay $0.09/GB egress.
+Or if not configured:
 
-When cloud storage is configured, the server uploads each completed task's video and returns a 302 redirect to a pre-signed URL on `GET /task/{id}/video`. If cloud storage is not configured, the server falls back to serving the video directly from the local filesystem.
+```
+Storage mode: LOCAL (R2_ENDPOINT / R2_BUCKET not set).
+             Videos served directly from this instance.
+```
 
-Add these to `~/.bashrc` and the systemd service `Environment=` section so they persist across restarts.
+> **Note:** R2 has **zero egress fees**. You only pay for storage ($0.015/GB/month).
+
+**How it works:**
+1. Server encodes video → uploads to R2 (one-time, in worker thread after generation)
+2. Local temp file deleted after successful upload
+3. `GET /task/{id}/video` returns **HTTP 302 redirect** to a pre-signed R2 URL
+4. Client downloads from Cloudflare CDN at full bandwidth
+
+**Without R2 configured:** videos are served directly from the GPU instance's local filesystem (slower downloads).
+
+Add these exports to `~/.bashrc` and the systemd service `Environment=` section so they persist across restarts.
 
 ---
 
@@ -430,6 +440,11 @@ WorkingDirectory=/root/LTX-2
 Environment="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 Environment="DISABLE_FLASH_ATTN=1"
 Environment="XFORMERS_DISABLED=1"
+Environment="R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com"
+Environment="R2_BUCKET=ltx-videos"
+Environment="R2_REGION=auto"
+Environment="R2_ACCESS_KEY=<token_id>"
+Environment="R2_SECRET_KEY=<token_secret>"
 ExecStart=/root/LTX-2/.venv/bin/python -m ltx_pipelines.server \
     --distilled-checkpoint-path /root/models/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
     --gemma-root /root/models/gemma \
