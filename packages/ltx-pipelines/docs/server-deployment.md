@@ -138,6 +138,10 @@ snapshot_download("google/gemma-3-12b-it-qat-q4_0-unquantized",
 # Required for FP8 quantization memory efficiency
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Disable flash-attention (incompatible with RTX Pro 6000 / Blackwell TMA)
+export DISABLE_FLASH_ATTN=1
+export XFORMERS_DISABLED=1
+
 # Optional: limit visible GPUs if you have multiple
 export CUDA_VISIBLE_DEVICES=0
 ```
@@ -146,6 +150,8 @@ Add these to `~/.bashrc` to persist across sessions:
 
 ```bash
 echo 'export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True' >> ~/.bashrc
+echo 'export DISABLE_FLASH_ATTN=1' >> ~/.bashrc
+echo 'export XFORMERS_DISABLED=1' >> ~/.bashrc
 ```
 
 ---
@@ -344,6 +350,8 @@ Type=simple
 User=root
 WorkingDirectory=/root/LTX-2
 Environment="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+Environment="DISABLE_FLASH_ATTN=1"
+Environment="XFORMERS_DISABLED=1"
 ExecStart=/root/LTX-2/.venv/bin/python -m ltx_pipelines.server \
     --distilled-checkpoint-path /root/models/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
     --gemma-root /root/models/gemma \

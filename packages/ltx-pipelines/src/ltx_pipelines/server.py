@@ -1,8 +1,12 @@
 import logging
+import os
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+os.environ.setdefault("DISABLE_FLASH_ATTN", "1")
+os.environ.setdefault("XFORMERS_DISABLED", "1")
 
 import torch
 from fastapi import FastAPI, HTTPException
