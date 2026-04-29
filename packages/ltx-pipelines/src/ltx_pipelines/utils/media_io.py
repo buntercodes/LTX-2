@@ -325,8 +325,6 @@ def encode_video(
     audio: Audio | None,
     output_path: str,
     video_chunks_number: int,
-    crf: int = 23,
-    preset: str = "medium",
 ) -> None:
     if isinstance(video, torch.Tensor):
         video = iter([video])
@@ -340,7 +338,6 @@ def encode_video(
     stream.width = width
     stream.height = height
     stream.pix_fmt = "yuv420p"
-    stream.options = {"crf": str(crf), "preset": preset}
 
     if audio is not None:
         audio_stream = _prepare_audio_stream(container, audio.sampling_rate)
