@@ -53,6 +53,8 @@ class GenerateRequestBase(BaseModel):
     num_frames: int = Field(121, ge=1, description="Number of frames (must be k*8+1)")
     frame_rate: float = Field(24.0, gt=0, description="Output frame rate")
     enhance_prompt: bool = Field(False, description="Enable automatic prompt enhancement")
+    crf: int = Field(18, ge=0, le=51, description="H.264 CRF quality (18=visually lossless, 23=default, 30=compact, 35=small)")
+    preset: str = Field("fast", description="libx264 preset: fast/medium/slow/veryslow (faster=bigger file)")
 
     @model_validator(mode="after")
     def _validate_dimensions(self) -> "GenerateRequestBase":
@@ -190,6 +192,8 @@ class Task:
             "width": self.req.width if self.req else None,
             "num_frames": self.req.num_frames if self.req else None,
             "frame_rate": self.req.frame_rate if self.req else None,
+            "crf": self.req.crf if self.req else None,
+            "preset": self.req.preset if self.req else None,
             "image_count": len(self.images),
             "error": self.error,
             "created_at": self.created_at,
@@ -295,6 +299,8 @@ class TaskManager:
                     audio=audio,
                     output_path=video_path,
                     video_chunks_number=video_chunks_number,
+                    crf=req.crf,
+                    preset=req.preset,
                 )
 
             task.status = TaskStatus.COMPLETED
