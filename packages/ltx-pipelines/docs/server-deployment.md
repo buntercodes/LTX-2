@@ -216,10 +216,10 @@ curl http://localhost:8000/health
 {"status":"ok","gpu_available":true}
 ```
 
-### Generate Video
+### Text-to-Video
 
 ```bash
-curl -X POST http://localhost:8000/generate \
+curl -X POST http://localhost:8000/txt2vid \
     -H "Content-Type: application/json" \
     -d '{
         "prompt": "A golden retriever running through a sunlit meadow, wind rustling through tall grass, cinematic warm lighting, shallow depth of field",
@@ -232,10 +232,10 @@ curl -X POST http://localhost:8000/generate \
     -o output.mp4
 ```
 
-### With image conditioning
+### Image-to-Video
 
 ```bash
-curl -X POST http://localhost:8000/generate \
+curl -X POST http://localhost:8000/img2vid \
     -H "Content-Type: application/json" \
     -d '{
         "prompt": "A person walking through a futuristic city at night, neon reflections on wet pavement",
@@ -261,8 +261,9 @@ curl -X POST http://localhost:8000/generate \
 ```python
 import requests
 
+# Text-to-Video
 response = requests.post(
-    "http://<SERVER_IP>:8000/generate",
+    "http://<SERVER_IP>:8000/txt2vid",
     json={
         "prompt": "A majestic eagle soaring over snow-capped mountain peaks, clouds drifting below, epic cinematic shot",
         "seed": 42,
@@ -270,17 +271,35 @@ response = requests.post(
         "width": 1920,
         "num_frames": 121,
         "frame_rate": 24.0,
-        "enhance_prompt": False,
     },
-    timeout=600,  # 10 minutes for generation + encoding
+    timeout=600,
 )
 
 if response.status_code == 200:
     with open("generated.mp4", "wb") as f:
         f.write(response.content)
-    print("Video saved to generated.mp4")
 else:
     print(f"Error {response.status_code}: {response.json()}")
+```
+
+```python
+# Image-to-Video
+response = requests.post(
+    "http://<SERVER_IP>:8000/img2vid",
+    json={
+        "prompt": "Cinematic drone shot revealing the landscape, smooth camera motion",
+        "seed": 42,
+        "height": 1088,
+        "width": 1920,
+        "num_frames": 121,
+        "frame_rate": 24.0,
+        "images": [
+            {"path": "/root/images/keyframe_000.jpg", "frame_idx": 0, "strength": 0.9},
+            {"path": "/root/images/keyframe_120.jpg", "frame_idx": 120, "strength": 0.7},
+        ],
+    },
+    timeout=600,
+)
 ```
 
 ---

@@ -28,7 +28,7 @@ class ImageConditioning(BaseModel):
     crf: int = Field(DEFAULT_IMAGE_CRF, description="JPEG CRF for image preprocessing")
 
 
-class GenerateRequest(BaseModel):
+class GenerateRequestBase(BaseModel):
     prompt: str = Field(..., description="Text prompt describing the desired video")
     seed: int = Field(10, ge=0, description="Random seed for reproducible generation")
     height: int = Field(1024, ge=64, description="Output height in pixels (divisible by 64)")
@@ -36,10 +36,9 @@ class GenerateRequest(BaseModel):
     num_frames: int = Field(121, ge=1, description="Number of frames (must be k*8+1)")
     frame_rate: float = Field(24.0, gt=0, description="Output frame rate")
     enhance_prompt: bool = Field(False, description="Enable automatic prompt enhancement")
-    images: list[ImageConditioning] = Field(default_factory=list, description="Optional image conditioning")
 
     @model_validator(mode="after")
-    def _validate_dimensions(self) -> "GenerateRequest":
+    def _validate_dimensions(self) -> "GenerateRequestBase":
         if self.height % 64 != 0:
             raise ValueError(f"height must be divisible by 64, got {self.height}")
         if self.width % 64 != 0:
@@ -47,6 +46,14 @@ class GenerateRequest(BaseModel):
         if (self.num_frames - 1) % 8 != 0:
             raise ValueError(f"num_frames must satisfy (frames - 1) % 8 == 0, got {self.num_frames}")
         return self
+
+
+class Txt2VidRequest(GenerateRequestBase):
+    pass
+
+
+class Img2VidRequest(GenerateRequestBase):
+    images: list[ImageConditioning] = Field(..., min_length=1, description="One or more conditioning images")
 
 
 class ServerConfig(BaseModel):
@@ -129,32 +136,19 @@ def create_app(config: ServerConfig) -> FastAPI:
     async def health() -> dict:
         return {"status": "ok", "gpu_available": torch.cuda.is_available()}
 
-    @app.post("/generate")
-    async def generate(req: GenerateRequest) -> FileResponse:
-        if manager.pipeline is None:
-            raise HTTPException(status_code=503, detail="Pipeline not ready")
-
-        images = [
-            ImageConditioningInput(
-                path=img.path,
-                frame_idx=img.frame_idx,
-                strength=img.strength,
-                crf=img.crf,
-            )
-            for img in req.images
-        ]
-
+    async def _generate(req: GenerateRequestBase, images: list[ImageConditioningInput]) -> FileResponse:
         tiling_config = TilingConfig.default()
         video_chunks_number = get_video_chunks_number(req.num_frames, tiling_config)
 
         logger.info(
-            "Generating: prompt='%s...', seed=%d, %dx%d, frames=%d, fps=%.1f",
+            "Generating: prompt='%s...', seed=%d, %dx%d, frames=%d, fps=%.1f, images=%d",
             req.prompt[:80],
             req.seed,
             req.width,
             req.height,
             req.num_frames,
             req.frame_rate,
+            len(images),
         )
 
         try:
@@ -198,6 +192,23 @@ def create_app(config: ServerConfig) -> FastAPI:
             filename="generated.mp4",
             background=lambda: Path(tmp_path).unlink(missing_ok=True),
         )
+
+    @app.post("/txt2vid")
+    async def txt2vid(req: Txt2VidRequest) -> FileResponse:
+        return await _generate(req, images=[])
+
+    @app.post("/img2vid")
+    async def img2vid(req: Img2VidRequest) -> FileResponse:
+        images = [
+            ImageConditioningInput(
+                path=img.path,
+                frame_idx=img.frame_idx,
+                strength=img.strength,
+                crf=img.crf,
+            )
+            for img in req.images
+        ]
+        return await _generate(req, images=images)
 
     return app
 
