@@ -177,13 +177,14 @@ def create_app(config: ServerConfig) -> FastAPI:
         tmp.close()
 
         try:
-            encode_video(
-                video=video_iter,
-                fps=req.frame_rate,
-                audio=audio,
-                output_path=tmp_path,
-                video_chunks_number=video_chunks_number,
-            )
+            with torch.inference_mode():
+                encode_video(
+                    video=video_iter,
+                    fps=req.frame_rate,
+                    audio=audio,
+                    output_path=tmp_path,
+                    video_chunks_number=video_chunks_number,
+                )
         except Exception as exc:
             Path(tmp_path).unlink(missing_ok=True)
             logger.exception("Video encoding failed")
