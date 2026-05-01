@@ -6,6 +6,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -87,6 +88,8 @@ class ServerConfig(BaseModel):
     offload_mode: OffloadMode = OffloadMode.NONE
     torch_compile: bool = False
     loras: list[str] = Field(default_factory=list)
+    max_workers: int = Field(3, ge=1, le=16, description="Total concurrent worker threads")
+    gpu_workers: int = Field(1, ge=1, le=8, description="Max concurrent GPU generations (1=serial GPU, >1 needs enough VRAM)")
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +303,14 @@ class TaskManager:
     MAX_QUEUE_SIZE: ClassVar[int] = 100
     MAX_HISTORY: ClassVar[int] = 200
 
-    def __init__(self, pipeline: DistilledPipeline, cloud: CloudStorage | None = None) -> None:
+    def __init__(
+        self,
+        pipeline: DistilledPipeline,
+        cloud: CloudStorage | None = None,
+        *,
+        max_workers: int = 3,
+        gpu_workers: int = 1,
+    ) -> None:
         self._pipeline = pipeline
         self._cloud = cloud
         self._storage_mode = "r2" if (cloud and cloud.configured) else "local"
@@ -310,9 +320,22 @@ class TaskManager:
         self._tasks: dict[str, Task] = {}
         self._output_dir = Path(tempfile.mkdtemp(prefix="ltx_tasks_"))
         self._running = True
-        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
-        self._worker.start()
-        logger.info("Task output dir: %s", self._output_dir)
+
+        self._max_workers = max_workers
+        self._gpu_semaphore = threading.Semaphore(gpu_workers)
+        self._active_count = 0
+        self._gpu_active_count = 0
+        self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ltx-wkr")
+        self._dispatcher = threading.Thread(target=self._dispatch_loop, daemon=True)
+        self._dispatcher.start()
+
+        logger.info(
+            "Task queue started: max_workers=%d gpu_workers=%d storage=%s output_dir=%s",
+            max_workers,
+            gpu_workers,
+            self._storage_mode,
+            self._output_dir,
+        )
 
     # -- submission ----------------------------------------------------------
 
@@ -347,9 +370,30 @@ class TaskManager:
         with self._lock:
             return [t.to_dict() for t in sorted(self._tasks.values(), key=lambda t: t.created_at)]
 
-    # -- worker --------------------------------------------------------------
+    # -- stats (protected by _lock) -------------------------------------------
 
-    def _worker_loop(self) -> None:
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return self._active_count
+
+    @property
+    def gpu_active_count(self) -> int:
+        with self._lock:
+            return self._gpu_active_count
+
+    @property
+    def queue_depth(self) -> int:
+        with self._lock:
+            return len(self._queue)
+
+    @property
+    def storage_mode(self) -> str:
+        return self._storage_mode
+
+    # -- dispatch -------------------------------------------------------------
+
+    def _dispatch_loop(self) -> None:
         while self._running:
             with self._lock:
                 while not self._queue and self._running:
@@ -357,34 +401,46 @@ class TaskManager:
                 if not self._running:
                     return
                 task = self._queue.popleft()
+                self._active_count += 1
 
-            self._run_task(task)
+            self._pool.submit(self._run_task, task)
 
     def _run_task(self, task: Task) -> None:
         req = task.req
         assert req is not None
 
-        task.status = TaskStatus.RUNNING
-        task.started_at = time.time()
+        with self._lock:
+            task.status = TaskStatus.RUNNING
+            task.started_at = time.time()
+
         logger.info("Task %s started (prompt='%s...')", task.task_id, req.prompt[:80])
 
         tiling_config = TilingConfig.default()
         video_chunks_number = get_video_chunks_number(req.num_frames, tiling_config)
 
         try:
-            with torch.inference_mode():
-                video_iter, audio = self._pipeline(
-                    prompt=req.prompt,
-                    seed=req.seed,
-                    height=req.height,
-                    width=req.width,
-                    num_frames=req.num_frames,
-                    frame_rate=req.frame_rate,
-                    images=task.images,
-                    tiling_config=tiling_config,
-                    enhance_prompt=req.enhance_prompt,
-                )
+            # --- GPU phase (serialized by semaphore) ---
+            with self._gpu_semaphore:
+                with self._lock:
+                    self._gpu_active_count += 1
+                try:
+                    with torch.inference_mode():
+                        video_iter, audio = self._pipeline(
+                            prompt=req.prompt,
+                            seed=req.seed,
+                            height=req.height,
+                            width=req.width,
+                            num_frames=req.num_frames,
+                            frame_rate=req.frame_rate,
+                            images=task.images,
+                            tiling_config=tiling_config,
+                            enhance_prompt=req.enhance_prompt,
+                        )
+                finally:
+                    with self._lock:
+                        self._gpu_active_count -= 1
 
+            # --- CPU / I/O phase (parallel across workers) ---
             video_path = str(self._output_dir / f"{task.task_id}.mp4")
 
             with torch.inference_mode():
@@ -396,10 +452,11 @@ class TaskManager:
                     video_chunks_number=video_chunks_number,
                 )
 
-            task.status = TaskStatus.COMPLETED
-            task.video_path = video_path
-            task.finished_at = time.time()
-            task.elapsed = round(task.finished_at - task.started_at, 1)
+            with self._lock:
+                task.status = TaskStatus.COMPLETED
+                task.video_path = video_path
+                task.finished_at = time.time()
+                task.elapsed = round(task.finished_at - task.started_at, 1)
             logger.info("Task %s completed in %.1fs", task.task_id, task.elapsed)
 
             if self._cloud and self._cloud.configured:
@@ -407,16 +464,22 @@ class TaskManager:
                     task.cloud_key = f"videos/{task.task_id}.mp4"
                     task.cloud_url = self._cloud.upload(video_path, task.cloud_key)
                     Path(video_path).unlink(missing_ok=True)
-                    task.video_path = None
+                    with self._lock:
+                        task.video_path = None
                 except Exception as exc:
                     logger.warning("Cloud upload failed (serving locally): %s", exc)
 
         except Exception as exc:
-            task.status = TaskStatus.FAILED
-            task.error = str(exc)
-            task.finished_at = time.time()
-            task.elapsed = round(task.finished_at - task.started_at, 1)
+            with self._lock:
+                task.status = TaskStatus.FAILED
+                task.error = str(exc)
+                task.finished_at = time.time()
+                task.elapsed = round(task.finished_at - task.started_at, 1)
             logger.exception("Task %s failed in %.1fs", task.task_id, task.elapsed)
+
+        finally:
+            with self._lock:
+                self._active_count -= 1
 
     # -- cleanup -------------------------------------------------------------
 
@@ -431,7 +494,9 @@ class TaskManager:
         self._running = False
         with self._lock:
             self._condition.notify_all()
-        self._worker.join(timeout=30)
+        self._dispatcher.join(timeout=5)
+        self._pool.shutdown(wait=True, cancel_futures=True)
+        logger.info("Task queue shut down.")
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +513,12 @@ def create_app(config: ServerConfig) -> FastAPI:
         nonlocal task_mgr
         pipeline_mgr.initialize(config)
         cloud = CloudStorage()
-        task_mgr = TaskManager(pipeline_mgr.pipeline, cloud=cloud)
+        task_mgr = TaskManager(
+            pipeline_mgr.pipeline,
+            cloud=cloud,
+            max_workers=config.max_workers,
+            gpu_workers=config.gpu_workers,
+        )
         logger.info("Server ready.")
         yield
         if task_mgr is not None:
@@ -464,8 +534,11 @@ def create_app(config: ServerConfig) -> FastAPI:
         return {
             "status": "ok",
             "gpu_available": torch.cuda.is_available(),
-            "storage_mode": task_mgr._storage_mode if task_mgr else "unknown",
-            "queue_depth": len(task_mgr._queue) if task_mgr else 0,
+            "storage_mode": task_mgr.storage_mode if task_mgr else "unknown",
+            "queue_depth": task_mgr.queue_depth if task_mgr else 0,
+            "active_workers": task_mgr.active_count if task_mgr else 0,
+            "gpu_workers": task_mgr.gpu_active_count if task_mgr else 0,
+            "max_workers": task_mgr._max_workers if task_mgr else 0,
         }
 
     # -- Submit --------------------------------------------------------------
@@ -544,7 +617,7 @@ def _banner() -> None:
     print(
         "\n"
         "  ╔══════════════════════════════════════════════════════╗\n"
-        "  ║           LTX-2 Video Generation API v2             ║\n"
+        "  ║           LTX-2.3 Video Generation API v2             ║\n"
         "  ╚══════════════════════════════════════════════════════╝\n"
     )
 
@@ -562,6 +635,8 @@ def main() -> None:
     parser.add_argument("--offload", type=str, default="none", choices=["none", "cpu", "disk"], help="Weight offloading strategy")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     parser.add_argument("--lora", type=str, action="append", default=[], help="LoRA adapter: PATH [STRENGTH]. Repeat for multiple.")
+    parser.add_argument("--max-workers", type=int, default=3, help="Total concurrent worker threads (default: 3)")
+    parser.add_argument("--gpu-workers", type=int, default=1, help="Max concurrent GPU generations (default: 1; increase only if VRAM permits)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8000, help="Bind port")
 
@@ -577,6 +652,8 @@ def main() -> None:
         offload_mode=offload_map[args.offload],
         torch_compile=args.compile,
         loras=args.lora,
+        max_workers=args.max_workers,
+        gpu_workers=args.gpu_workers,
     )
 
     _banner()

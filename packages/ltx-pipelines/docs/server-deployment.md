@@ -177,6 +177,7 @@ python -m ltx_pipelines.server \
     --gemma-root ~/models/gemma \
     --spatial-upsampler-path ~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
     --quantization fp8-cast \
+    --max-workers 3 --gpu-workers 1 \
     --host 0.0.0.0 \
     --port 8000
 ```
@@ -203,9 +204,35 @@ Expected output:
 INFO:     Started server process [1]
 INFO:     Waiting for application startup.
 INFO:ltx_server:Loading DistilledPipeline...
+INFO:ltx_server:Task queue started: max_workers=3 gpu_workers=1 storage=r2 output_dir=/tmp/ltx_tasks_...
 INFO:ltx_server:Pipeline loaded successfully.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+### Worker pool architecture
+
+The server uses a professional task queue with concurrent workers:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-workers` | 3 | Total pool threads. Handles GPU generation + encoding + upload. |
+| `--gpu-workers` | 1 | Max concurrent GPU generations (guarded by semaphore). |
+
+**How it works:**
+1. Tasks submitted to an internal FIFO queue
+2. A dispatcher picks tasks and hands them to the thread pool
+3. Each worker acquires a GPU semaphore before running the model (serializes GPU access)
+4. After GPU generation, the semaphore is released and video encoding + upload run in parallel
+5. With `--gpu-workers 1`, only one task uses the GPU at a time, but encoding of completed tasks overlaps with generation of the next task
+
+**Tuning for RTX Pro 6000 (96 GB):**
+- `--gpu-workers 1` — safe default, ~50% GPU utilization
+- `--gpu-workers 2` — needs ~60 GB VRAM (2× fp8-cast), ~80% GPU utilization  
+- `--gpu-workers 3` — needs ~90 GB VRAM (3× fp8-cast), ~95% GPU utilization, tight but possible
+
+Use the `/health` endpoint to monitor: `queue_depth`, `active_workers`, `gpu_workers`.
+
 ```
 
 ---
@@ -450,6 +477,7 @@ ExecStart=/root/LTX-2/.venv/bin/python -m ltx_pipelines.server \
     --gemma-root /root/models/gemma \
     --spatial-upsampler-path /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
     --quantization fp8-cast \
+    --max-workers 3 --gpu-workers 1 \
     --host 0.0.0.0 \
     --port 8000
 Restart=always
