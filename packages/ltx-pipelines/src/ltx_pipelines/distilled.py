@@ -55,9 +55,11 @@ class DistilledPipeline:
         registry: Registry | None = None,
         torch_compile: bool = False,
         offload_mode: OffloadMode = OffloadMode.NONE,
+        keep_loaded: bool = False,
     ):
         self.device = device or get_device()
         self.dtype = torch.bfloat16
+        self.keep_loaded = keep_loaded
 
         self.prompt_encoder = PromptEncoder(
             distilled_checkpoint_path,
@@ -66,8 +68,11 @@ class DistilledPipeline:
             self.device,
             registry=registry,
             offload_mode=offload_mode,
+            keep_loaded=keep_loaded,
         )
-        self.image_conditioner = ImageConditioner(distilled_checkpoint_path, self.dtype, self.device, registry=registry)
+        self.image_conditioner = ImageConditioner(
+            distilled_checkpoint_path, self.dtype, self.device, registry=registry, keep_loaded=keep_loaded
+        )
         self.stage = DiffusionStage(
             distilled_checkpoint_path,
             self.dtype,
@@ -77,12 +82,26 @@ class DistilledPipeline:
             registry=registry,
             torch_compile=torch_compile,
             offload_mode=offload_mode,
+            keep_loaded=keep_loaded,
         )
         self.upsampler = VideoUpsampler(
-            distilled_checkpoint_path, spatial_upsampler_path, self.dtype, self.device, registry=registry
+            distilled_checkpoint_path, spatial_upsampler_path, self.dtype, self.device,
+            registry=registry, keep_loaded=keep_loaded,
         )
-        self.video_decoder = VideoDecoder(distilled_checkpoint_path, self.dtype, self.device, registry=registry)
-        self.audio_decoder = AudioDecoder(distilled_checkpoint_path, self.dtype, self.device, registry=registry)
+        self.video_decoder = VideoDecoder(
+            distilled_checkpoint_path, self.dtype, self.device, registry=registry, keep_loaded=keep_loaded
+        )
+        self.audio_decoder = AudioDecoder(
+            distilled_checkpoint_path, self.dtype, self.device, registry=registry, keep_loaded=keep_loaded
+        )
+
+    def unload(self) -> None:
+        self.prompt_encoder.unload()
+        self.image_conditioner.unload()
+        self.stage.unload()
+        self.upsampler.unload()
+        self.video_decoder.unload()
+        self.audio_decoder.unload()
 
     def __call__(  # noqa: PLR0913
         self,

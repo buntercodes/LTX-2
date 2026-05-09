@@ -140,6 +140,7 @@ def _cleanup_iter(it: Iterator[torch.Tensor], model: torch.nn.Module) -> Iterato
 
 class DiffusionStage:
     """Owns transformer lifecycle. Builds on each call, frees on exit.
+    When *keep_loaded* is ``True`` the model stays in GPU memory across calls.
     Replaces the manual ``model_ledger.transformer()`` / ``del transformer``
     pattern in every pipeline.
     """
@@ -154,6 +155,7 @@ class DiffusionStage:
         registry: Registry | None = None,
         torch_compile: bool = False,
         offload_mode: OffloadMode = OffloadMode.NONE,
+        keep_loaded: bool = False,
     ) -> None:
         if offload_mode != OffloadMode.NONE:
             if torch_compile:
@@ -177,6 +179,8 @@ class DiffusionStage:
         self._quantization = quantization
         self._torch_compile = torch_compile
         self._offload_mode = offload_mode
+        self._keep_loaded = keep_loaded
+        self._cached_transformer: X0Model | None = None
         self._transformer_builder = Builder(
             model_path=checkpoint_path,
             model_class_configurator=LTXModelConfigurator,
@@ -215,6 +219,12 @@ class DiffusionStage:
         return X0Model(builder.build(device=target, **kwargs)).to(target).eval()
 
     def _transformer_ctx(self, **kwargs: object) -> AbstractContextManager:
+        if self._keep_loaded:
+            from contextlib import nullcontext
+
+            if self._cached_transformer is None:
+                self._cached_transformer = self._build_transformer(**kwargs)
+            return nullcontext(self._cached_transformer)
         if self._offload_mode != OffloadMode.NONE:
             return _streaming_model(self._streaming_builder, self._offload_mode, self._device, self._dtype)
         return gpu_model(self._build_transformer(**kwargs))
@@ -294,6 +304,13 @@ class DiffusionStage:
 
         return video_state, audio_state
 
+    def unload(self) -> None:
+        if self._cached_transformer is not None:
+            self._cached_transformer.to("meta")
+            self._cached_transformer = None
+            cleanup_memory()
+            logger.debug("DiffusionStage transformer unloaded")
+
     def __call__(  # noqa: PLR0913
         self,
         denoiser: Denoiser,
@@ -359,10 +376,14 @@ class PromptEncoder:
         device: torch.device,
         registry: Registry | None = None,
         offload_mode: OffloadMode = OffloadMode.NONE,
+        keep_loaded: bool = False,
     ) -> None:
         self._dtype = dtype
         self._device = device
         self._offload_mode = offload_mode
+        self._keep_loaded = keep_loaded
+        self._cached_text_encoder: torch.nn.Module | None = None
+        self._cached_embeddings_processor: torch.nn.Module | None = None
 
         module_ops = module_ops_from_gemma_root(gemma_root)
         model_folder = find_matching_file(gemma_root, "model*.safetensors").parent
@@ -392,6 +413,14 @@ class PromptEncoder:
         )
 
     def _text_encoder_ctx(self) -> AbstractContextManager:
+        if self._keep_loaded:
+            from contextlib import nullcontext
+
+            if self._cached_text_encoder is None:
+                self._cached_text_encoder = (
+                    self._text_encoder_builder.build(device=self._device, dtype=self._dtype).eval()
+                )
+            return nullcontext(self._cached_text_encoder)
         if self._offload_mode != OffloadMode.NONE:
             return _streaming_model(self._streaming_text_encoder_builder, self._offload_mode, self._device, self._dtype)
         return gpu_model(self._text_encoder_builder.build(device=self._device, dtype=self._dtype).eval())
@@ -413,10 +442,28 @@ class PromptEncoder:
                 )
             raw_outputs = [text_encoder.encode(p) for p in prompts]
 
+        if self._keep_loaded:
+            if self._cached_embeddings_processor is None:
+                self._cached_embeddings_processor = (
+                    self._embeddings_processor_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
+                )
+            embeddings_processor = self._cached_embeddings_processor
+            return [embeddings_processor.process_hidden_states(hs, mask) for hs, mask in raw_outputs]
+
         with gpu_model(
             self._embeddings_processor_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
         ) as embeddings_processor:
             return [embeddings_processor.process_hidden_states(hs, mask) for hs, mask in raw_outputs]
+
+    def unload(self) -> None:
+        if self._cached_text_encoder is not None:
+            self._cached_text_encoder.to("meta")
+            self._cached_text_encoder = None
+        if self._cached_embeddings_processor is not None:
+            self._cached_embeddings_processor.to("meta")
+            self._cached_embeddings_processor = None
+        cleanup_memory()
+        logger.debug("PromptEncoder unloaded")
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +482,12 @@ class ImageConditioner:
         dtype: torch.dtype,
         device: torch.device,
         registry: Registry | None = None,
+        keep_loaded: bool = False,
     ) -> None:
         self._dtype = dtype
         self._device = device
+        self._keep_loaded = keep_loaded
+        self._cached_encoder: VideoEncoder | None = None
         self._encoder_builder = Builder(
             model_path=checkpoint_path,
             model_class_configurator=VideoEncoderConfigurator,
@@ -450,8 +500,19 @@ class ImageConditioner:
 
     def __call__(self, fn: Callable[[VideoEncoder], T]) -> T:
         """Build video encoder → call *fn(encoder)* → free encoder."""
+        if self._keep_loaded:
+            if self._cached_encoder is None:
+                self._cached_encoder = self._build_encoder()
+            return fn(self._cached_encoder)
         with gpu_model(self._build_encoder()) as encoder:
             return fn(encoder)
+
+    def unload(self) -> None:
+        if self._cached_encoder is not None:
+            self._cached_encoder.to("meta")
+            self._cached_encoder = None
+            cleanup_memory()
+            logger.debug("ImageConditioner unloaded")
 
 
 # ---------------------------------------------------------------------------
@@ -469,9 +530,13 @@ class VideoUpsampler:
         dtype: torch.dtype,
         device: torch.device,
         registry: Registry | None = None,
+        keep_loaded: bool = False,
     ) -> None:
         self._dtype = dtype
         self._device = device
+        self._keep_loaded = keep_loaded
+        self._cached_encoder: VideoEncoder | None = None
+        self._cached_upsampler: torch.nn.Module | None = None
         self._encoder_builder = Builder(
             model_path=checkpoint_path,
             model_class_configurator=VideoEncoderConfigurator,
@@ -486,6 +551,12 @@ class VideoUpsampler:
 
     def __call__(self, latent: torch.Tensor) -> torch.Tensor:
         """Upsample *latent* using video encoder + spatial upsampler, then free both."""
+        if self._keep_loaded:
+            if self._cached_encoder is None:
+                self._cached_encoder = self._encoder_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
+            if self._cached_upsampler is None:
+                self._cached_upsampler = self._upsampler_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
+            return upsample_video(latent=latent, video_encoder=self._cached_encoder, upsampler=self._cached_upsampler)
         with (
             gpu_model(
                 self._encoder_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
@@ -495,6 +566,16 @@ class VideoUpsampler:
             ) as upsampler,
         ):
             return upsample_video(latent=latent, video_encoder=encoder, upsampler=upsampler)
+
+    def unload(self) -> None:
+        if self._cached_encoder is not None:
+            self._cached_encoder.to("meta")
+            self._cached_encoder = None
+        if self._cached_upsampler is not None:
+            self._cached_upsampler.to("meta")
+            self._cached_upsampler = None
+        cleanup_memory()
+        logger.debug("VideoUpsampler unloaded")
 
 
 # ---------------------------------------------------------------------------
@@ -513,9 +594,12 @@ class VideoDecoder:
         dtype: torch.dtype,
         device: torch.device,
         registry: Registry | None = None,
+        keep_loaded: bool = False,
     ) -> None:
         self._dtype = dtype
         self._device = device
+        self._keep_loaded = keep_loaded
+        self._cached_decoder: torch.nn.Module | None = None
         self._decoder_builder = Builder(
             model_path=checkpoint_path,
             model_class_configurator=VideoDecoderConfigurator,
@@ -537,8 +621,19 @@ class VideoDecoder:
                 (default) maps to ``[0, 255]``.  Any floating dtype returns
                 ``[0, 1]`` cast to that dtype.
         """
+        if self._keep_loaded:
+            if self._cached_decoder is None:
+                self._cached_decoder = self._decoder_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
+            return self._cached_decoder.decode_video(latent, tiling_config, generator, output_dtype=output_dtype)
         decoder = self._decoder_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
         return _cleanup_iter(decoder.decode_video(latent, tiling_config, generator, output_dtype=output_dtype), decoder)
+
+    def unload(self) -> None:
+        if self._cached_decoder is not None:
+            self._cached_decoder.to("meta")
+            self._cached_decoder = None
+            cleanup_memory()
+            logger.debug("VideoDecoder unloaded")
 
 
 # ---------------------------------------------------------------------------
@@ -555,9 +650,13 @@ class AudioDecoder:
         dtype: torch.dtype,
         device: torch.device,
         registry: Registry | None = None,
+        keep_loaded: bool = False,
     ) -> None:
         self._dtype = dtype
         self._device = device
+        self._keep_loaded = keep_loaded
+        self._cached_decoder: torch.nn.Module | None = None
+        self._cached_vocoder: torch.nn.Module | None = None
         self._decoder_builder = Builder(
             model_path=checkpoint_path,
             model_class_configurator=AudioDecoderConfigurator,
@@ -573,6 +672,12 @@ class AudioDecoder:
 
     def __call__(self, latent: torch.Tensor) -> Audio:
         """Decode audio *latent* through VAE decoder + vocoder, then free both."""
+        if self._keep_loaded:
+            if self._cached_decoder is None:
+                self._cached_decoder = self._decoder_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
+            if self._cached_vocoder is None:
+                self._cached_vocoder = self._vocoder_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
+            return vae_decode_audio(latent, self._cached_decoder, self._cached_vocoder)
         with (
             gpu_model(
                 self._decoder_builder.build(device=self._device, dtype=self._dtype).to(self._device).eval()
@@ -582,6 +687,16 @@ class AudioDecoder:
             ) as vocoder,
         ):
             return vae_decode_audio(latent, decoder, vocoder)
+
+    def unload(self) -> None:
+        if self._cached_decoder is not None:
+            self._cached_decoder.to("meta")
+            self._cached_decoder = None
+        if self._cached_vocoder is not None:
+            self._cached_vocoder.to("meta")
+            self._cached_vocoder = None
+        cleanup_memory()
+        logger.debug("AudioDecoder unloaded")
 
 
 # ---------------------------------------------------------------------------

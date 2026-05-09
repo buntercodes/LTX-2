@@ -90,6 +90,7 @@ class ServerConfig(BaseModel):
     loras: list[str] = Field(default_factory=list)
     max_workers: int = Field(3, ge=1, le=16, description="Total concurrent worker threads")
     gpu_workers: int = Field(1, ge=1, le=8, description="Max concurrent GPU generations (1=serial GPU, >1 needs enough VRAM)")
+    keep_loaded: bool = Field(False, description="Keep models in GPU memory between tasks (uses more VRAM, faster inference)")
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,7 @@ class PipelineManager:
             quantization=_build_quantization(config.quantization),
             torch_compile=config.torch_compile,
             offload_mode=config.offload_mode,
+            keep_loaded=config.keep_loaded,
         )
         logger.info("Pipeline loaded.")
 
@@ -330,10 +332,11 @@ class TaskManager:
         self._dispatcher.start()
 
         logger.info(
-            "Task queue started: max_workers=%d gpu_workers=%d storage=%s output_dir=%s",
+            "Task queue started: max_workers=%d gpu_workers=%d storage=%s keep_loaded=%s output_dir=%s",
             max_workers,
             gpu_workers,
             self._storage_mode,
+            pipeline.keep_loaded if hasattr(pipeline, 'keep_loaded') else False,
             self._output_dir,
         )
 
@@ -535,6 +538,7 @@ def create_app(config: ServerConfig) -> FastAPI:
             "status": "ok",
             "gpu_available": torch.cuda.is_available(),
             "storage_mode": task_mgr.storage_mode if task_mgr else "unknown",
+            "keep_loaded": pipeline_mgr.pipeline.keep_loaded if task_mgr else False,
             "queue_depth": task_mgr.queue_depth if task_mgr else 0,
             "active_workers": task_mgr.active_count if task_mgr else 0,
             "gpu_workers": task_mgr.gpu_active_count if task_mgr else 0,
@@ -634,6 +638,7 @@ def main() -> None:
     parser.add_argument("--quantization", type=str, default=None, choices=["fp8-cast", "fp8-scaled-mm"], help="Quantization policy")
     parser.add_argument("--offload", type=str, default="none", choices=["none", "cpu", "disk"], help="Weight offloading strategy")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
+    parser.add_argument("--keep-loaded", action="store_true", help="Keep models in GPU memory between tasks (uses more VRAM, faster)")
     parser.add_argument("--lora", type=str, action="append", default=[], help="LoRA adapter: PATH [STRENGTH]. Repeat for multiple.")
     parser.add_argument("--max-workers", type=int, default=3, help="Total concurrent worker threads (default: 3)")
     parser.add_argument("--gpu-workers", type=int, default=1, help="Max concurrent GPU generations (default: 1; increase only if VRAM permits)")
@@ -654,6 +659,7 @@ def main() -> None:
         loras=args.lora,
         max_workers=args.max_workers,
         gpu_workers=args.gpu_workers,
+        keep_loaded=args.keep_loaded,
     )
 
     _banner()

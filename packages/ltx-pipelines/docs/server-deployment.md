@@ -169,7 +169,7 @@ python -m ltx_pipelines.server \
     --port 8000
 ```
 
-### Production mode (fp8-cast — uses ~30 GB VRAM, faster)
+### Production mode (fp8-cast + keep_loaded — recommended for RTX Pro 6000)
 
 ```bash
 python -m ltx_pipelines.server \
@@ -177,10 +177,25 @@ python -m ltx_pipelines.server \
     --gemma-root ~/models/gemma \
     --spatial-upsampler-path ~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
     --quantization fp8-cast \
+    --keep-loaded \
     --max-workers 3 --gpu-workers 1 \
     --host 0.0.0.0 \
     --port 8000
 ```
+
+### Production with 2 concurrent GPU generations
+
+```bash
+python -m ltx_pipelines.server \
+    --distilled-checkpoint-path ~/models/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
+    --gemma-root ~/models/gemma \
+    --spatial-upsampler-path ~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
+    --quantization fp8-cast \
+    --keep-loaded \
+    --max-workers 3 --gpu-workers 2 \
+    --host 0.0.0.0 \
+    --port 8000
+``````
 
 ### With LoRA adapters
 
@@ -218,6 +233,7 @@ The server uses a professional task queue with concurrent workers:
 |------|---------|-------------|
 | `--max-workers` | 3 | Total pool threads. Handles GPU generation + encoding + upload. |
 | `--gpu-workers` | 1 | Max concurrent GPU generations (guarded by semaphore). |
+| `--keep-loaded` | off | Keep models in GPU RAM between tasks. Speeds up inference. |
 
 **How it works:**
 1. Tasks submitted to an internal FIFO queue
@@ -226,12 +242,37 @@ The server uses a professional task queue with concurrent workers:
 4. After GPU generation, the semaphore is released and video encoding + upload run in parallel
 5. With `--gpu-workers 1`, only one task uses the GPU at a time, but encoding of completed tasks overlaps with generation of the next task
 
+### `--keep-loaded` optimization (skip memory cleanup)
+
+Without `--keep-loaded`, each block (transformer, VAE decoder, upsampler, text encoder) loads into GPU memory, runs, then frees. This wastes 5–10 seconds per task on model construction.
+
+With `--keep-loaded`, all models stay in GPU RAM across all tasks:
+
+| Model | Size (fp8-cast) | Resident |
+|-------|-----------------|----------|
+| Transformer | ~30 GB | Yes |
+| Gemma text encoder (q4) | ~12 GB | Yes |
+| VAE decoder | ~5 GB | Yes |
+| Upsampler | ~5 GB | Yes |
+| VAE encoder | ~3 GB | Yes |
+| **Total** | **~55 GB** | |
+
+The remaining ~41 GB of the RTX Pro 6000's 96 GB handles activations, intermediate tensors, and concurrent worker state.
+
+**VRAM comparison:**
+
+| Mode | Per-task overhead | VRAM used | Benefit |
+|------|------------------|-----------|---------|
+| fp8-cast, no keep | 3–5s model loading | ~35 GB (peaks) | Baseline |
+| fp8-cast, keep-loaded | 0s model loading | ~55 GB (steady) | ~15% faster per task |
+| bf16, keep-loaded | 0s model loading | ~80 GB (steady) | Not recommended with GPU workers >1 |
+
 **Tuning for RTX Pro 6000 (96 GB):**
 - `--gpu-workers 1` — safe default, ~50% GPU utilization
-- `--gpu-workers 2` — needs ~60 GB VRAM (2× fp8-cast), ~80% GPU utilization  
-- `--gpu-workers 3` — needs ~90 GB VRAM (3× fp8-cast), ~95% GPU utilization, tight but possible
+- `--gpu-workers 2` — needs ~60 GB VRAM (2× activations), works with keep-loaded
+- `--gpu-workers 3` — needs ~90 GB VRAM (3× activations), possible but tight
 
-Use the `/health` endpoint to monitor: `queue_depth`, `active_workers`, `gpu_workers`.
+Use the `/health` endpoint to monitor: `queue_depth`, `active_workers`, `gpu_workers`, `keep_loaded`.
 
 ```
 
