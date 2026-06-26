@@ -35,13 +35,13 @@ class GenerateRequest(BaseModel):
         default=None, 
         ge=64, 
         le=1088,
-        description="Video height (default: 512, must be multiple of 64)"
+        description="Video height (default: 1024 for two-stage, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
         ge=64, 
         le=1920,
-        description="Video width (default: 768, must be multiple of 64)"
+        description="Video width (default: 1536 for two-stage, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
@@ -57,7 +57,7 @@ class GenerateRequest(BaseModel):
     )
     seed: int | None = Field(
         default=None,
-        description="Random seed for reproducibility"
+        description="Random seed for reproducibility (default: 10)"
     )
     images: list[ImageInput] = Field(
         default_factory=list,
@@ -103,13 +103,13 @@ class TextToVideoRequest(BaseModel):
         default=None, 
         ge=64, 
         le=1088,
-        description="Video height (default: 512, must be multiple of 64)"
+        description="Video height (default: 1024 for two-stage, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
         ge=64, 
         le=1920,
-        description="Video width (default: 768, must be multiple of 64)"
+        description="Video width (default: 1536 for two-stage, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
@@ -125,7 +125,7 @@ class TextToVideoRequest(BaseModel):
     )
     seed: int | None = Field(
         default=None,
-        description="Random seed for reproducibility"
+        description="Random seed for reproducibility (default: 10)"
     )
     enhance_prompt: bool = Field(
         default=False,
@@ -172,13 +172,13 @@ class ImageToVideoRequest(BaseModel):
         default=None, 
         ge=64, 
         le=1088,
-        description="Video height (default: 512, must be multiple of 64)"
+        description="Video height (default: 1024 for two-stage, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
         ge=64, 
         le=1920,
-        description="Video width (default: 768, must be multiple of 64)"
+        description="Video width (default: 1536 for two-stage, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
@@ -194,7 +194,7 @@ class ImageToVideoRequest(BaseModel):
     )
     seed: int | None = Field(
         default=None,
-        description="Random seed for reproducibility"
+        description="Random seed for reproducibility (default: 10)"
     )
     enhance_prompt: bool = Field(
         default=False,

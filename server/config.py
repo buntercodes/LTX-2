@@ -43,12 +43,13 @@ class Settings(BaseSettings):
         description="List of LoRA adapter paths"
     )
 
-    # Inference defaults
-    default_height: int = Field(default=512, ge=64, description="Default video height (must be multiple of 64)")
-    default_width: int = Field(default=768, ge=64, description="Default video width (must be multiple of 64)")
+    # Inference defaults (for two-stage distilled pipeline, these are stage 2 output dimensions)
+    # The pipeline internally uses half these values for stage 1, then upsamples
+    default_height: int = Field(default=1024, ge=64, description="Default video height (must be multiple of 64)")
+    default_width: int = Field(default=1536, ge=64, description="Default video width (must be multiple of 64)")
     default_num_frames: int = Field(default=121, ge=9, description="Default frame count")
     default_frame_rate: float = Field(default=24.0, ge=1.0, le=120.0, description="Default FPS")
-    default_seed: int = Field(default=42, description="Default random seed")
+    default_seed: int = Field(default=10, description="Default random seed")
 
     # Resource limits
     max_concurrent_jobs: int = Field(
