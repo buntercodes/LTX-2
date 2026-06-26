@@ -93,6 +93,7 @@ class PipelineService:
         """Check if model is loaded."""
         return self._loaded
 
+    @torch.inference_mode()
     def generate_video(
         self,
         prompt: str,
