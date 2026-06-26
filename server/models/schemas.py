@@ -24,7 +24,7 @@ class ImageInput(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    """Video generation request."""
+    """Video generation request (legacy)."""
     prompt: str = Field(
         ..., 
         min_length=1, 
@@ -62,6 +62,139 @@ class GenerateRequest(BaseModel):
     images: list[ImageInput] = Field(
         default_factory=list,
         description="Input images for conditioning"
+    )
+    enhance_prompt: bool = Field(
+        default=False,
+        description="Enable automatic prompt enhancement"
+    )
+    callback_url: str | None = Field(
+        default=None,
+        description="URL to receive webhook callback when job completes"
+    )
+
+    @field_validator("num_frames")
+    @classmethod
+    def validate_num_frames(cls, v: int | None) -> int | None:
+        """Validate frame count follows 8k+1 format."""
+        if v is not None and (v - 1) % 8 != 0:
+            raise ValueError(
+                f"num_frames must be 8k+1 format (e.g., 9, 17, 25, 33, ..., 121). Got: {v}"
+            )
+        return v
+
+    @field_validator("height", "width")
+    @classmethod
+    def validate_dimensions(cls, v: int | None) -> int | None:
+        """Validate dimensions are divisible by 32."""
+        if v is not None and v % 32 != 0:
+            raise ValueError(f"Dimension must be divisible by 32. Got: {v}")
+        return v
+
+
+class TextToVideoRequest(BaseModel):
+    """Text-to-video generation request."""
+    prompt: str = Field(
+        ..., 
+        min_length=1, 
+        max_length=2000,
+        description="Text prompt for video generation"
+    )
+    height: int | None = Field(
+        default=None, 
+        ge=32, 
+        le=1088,
+        description="Video height (default: 512)"
+    )
+    width: int | None = Field(
+        default=None, 
+        ge=32, 
+        le=1920,
+        description="Video width (default: 768)"
+    )
+    num_frames: int | None = Field(
+        default=None, 
+        ge=9, 
+        le=321,
+        description="Number of frames (must be 8k+1, default: 121)"
+    )
+    frame_rate: float | None = Field(
+        default=None, 
+        ge=1.0, 
+        le=60.0,
+        description="Frames per second (default: 24.0)"
+    )
+    seed: int | None = Field(
+        default=None,
+        description="Random seed for reproducibility"
+    )
+    enhance_prompt: bool = Field(
+        default=False,
+        description="Enable automatic prompt enhancement"
+    )
+    callback_url: str | None = Field(
+        default=None,
+        description="URL to receive webhook callback when job completes"
+    )
+
+    @field_validator("num_frames")
+    @classmethod
+    def validate_num_frames(cls, v: int | None) -> int | None:
+        """Validate frame count follows 8k+1 format."""
+        if v is not None and (v - 1) % 8 != 0:
+            raise ValueError(
+                f"num_frames must be 8k+1 format (e.g., 9, 17, 25, 33, ..., 121). Got: {v}"
+            )
+        return v
+
+    @field_validator("height", "width")
+    @classmethod
+    def validate_dimensions(cls, v: int | None) -> int | None:
+        """Validate dimensions are divisible by 32."""
+        if v is not None and v % 32 != 0:
+            raise ValueError(f"Dimension must be divisible by 32. Got: {v}")
+        return v
+
+
+class ImageToVideoRequest(BaseModel):
+    """Image-to-video generation request."""
+    prompt: str = Field(
+        ..., 
+        min_length=1, 
+        max_length=2000,
+        description="Text prompt for video generation"
+    )
+    images: list[ImageInput] = Field(
+        ..., 
+        min_length=1,
+        description="Input images for conditioning (at least one required)"
+    )
+    height: int | None = Field(
+        default=None, 
+        ge=32, 
+        le=1088,
+        description="Video height (default: 512)"
+    )
+    width: int | None = Field(
+        default=None, 
+        ge=32, 
+        le=1920,
+        description="Video width (default: 768)"
+    )
+    num_frames: int | None = Field(
+        default=None, 
+        ge=9, 
+        le=321,
+        description="Number of frames (must be 8k+1, default: 121)"
+    )
+    frame_rate: float | None = Field(
+        default=None, 
+        ge=1.0, 
+        le=60.0,
+        description="Frames per second (default: 24.0)"
+    )
+    seed: int | None = Field(
+        default=None,
+        description="Random seed for reproducibility"
     )
     enhance_prompt: bool = Field(
         default=False,

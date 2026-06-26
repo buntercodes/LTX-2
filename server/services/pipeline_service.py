@@ -102,7 +102,7 @@ class PipelineService:
         num_frames: int | None = None,
         frame_rate: float | None = None,
         seed: int | None = None,
-        images: list[ImageConditioningInput] | None = None,
+        images: list[tuple[str, int, float, int]] | None = None,
         enhance_prompt: bool = False,
         tiling_config: TilingConfig | None = None,
     ) -> dict:
@@ -117,7 +117,7 @@ class PipelineService:
             num_frames: Number of frames (uses default if None)
             frame_rate: FPS (uses default if None)
             seed: Random seed (uses default if None)
-            images: List of image conditioning inputs
+            images: List of tuples (path, frame_idx, strength, crf)
             enhance_prompt: Enable prompt enhancement
             tiling_config: Tiling configuration for memory efficiency
 
@@ -150,6 +150,13 @@ class PipelineService:
 
         start_time = time.time()
 
+        # Convert image tuples to ImageConditioningInput objects
+        from ltx_pipelines.utils.args import ImageConditioningInput
+        image_inputs = [
+            ImageConditioningInput(path=path, frame_idx=frame_idx, strength=strength, crf=crf)
+            for path, frame_idx, strength, crf in (images or [])
+        ]
+
         # Run pipeline
         video_iterator, audio = self._pipeline(
             prompt=prompt,
@@ -158,7 +165,7 @@ class PipelineService:
             width=width,
             num_frames=num_frames,
             frame_rate=frame_rate,
-            images=images or [],
+            images=image_inputs,
             tiling_config=tiling_config,
             enhance_prompt=enhance_prompt,
         )

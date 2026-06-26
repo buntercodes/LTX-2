@@ -19,6 +19,8 @@ from models.schemas import (
     ImageInput,
     JobStatus,
     JobStatusResponse,
+    TextToVideoRequest,
+    ImageToVideoRequest,
 )
 from services.job_queue import Job, JobQueue
 from services.pipeline_service import PipelineService
@@ -39,6 +41,62 @@ def get_job_queue(request: Request) -> JobQueue:
 
 
 @router.post(
+    "/generate/text-to-video",
+    response_model=GenerateResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        429: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+    summary="Generate video from text",
+    description="Submit a text-to-video generation job to the queue.",
+)
+async def text_to_video(
+    request: TextToVideoRequest,
+    background_tasks: BackgroundTasks,
+    pipeline: PipelineService = Depends(get_pipeline),
+    job_queue: JobQueue = Depends(get_job_queue),
+    settings: Settings = Depends(get_settings),
+) -> GenerateResponse:
+    """Submit a text-to-video generation job."""
+    return await _submit_generation_job(
+        request=request,
+        background_tasks=background_tasks,
+        pipeline=pipeline,
+        job_queue=job_queue,
+        settings=settings,
+    )
+
+
+@router.post(
+    "/generate/image-to-video",
+    response_model=GenerateResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        429: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+    summary="Generate video from image",
+    description="Submit an image-to-video generation job to the queue.",
+)
+async def image_to_video(
+    request: ImageToVideoRequest,
+    background_tasks: BackgroundTasks,
+    pipeline: PipelineService = Depends(get_pipeline),
+    job_queue: JobQueue = Depends(get_job_queue),
+    settings: Settings = Depends(get_settings),
+) -> GenerateResponse:
+    """Submit an image-to-video generation job."""
+    return await _submit_generation_job(
+        request=request,
+        background_tasks=background_tasks,
+        pipeline=pipeline,
+        job_queue=job_queue,
+        settings=settings,
+    )
+
+
+@router.post(
     "/generate",
     response_model=GenerateResponse,
     responses={
@@ -46,17 +104,35 @@ def get_job_queue(request: Request) -> JobQueue:
         429: {"model": ErrorResponse},
         503: {"model": ErrorResponse},
     },
-    summary="Generate a video",
-    description="Submit a video generation job to the queue.",
+    summary="Generate video (legacy endpoint)",
+    description="Submit a video generation job. Use /text-to-video or /image-to-video for new integrations.",
+    deprecated=True,
 )
-async def generate_video(
+async def generate_video_legacy(
     request: GenerateRequest,
     background_tasks: BackgroundTasks,
     pipeline: PipelineService = Depends(get_pipeline),
     job_queue: JobQueue = Depends(get_job_queue),
     settings: Settings = Depends(get_settings),
 ) -> GenerateResponse:
-    """Submit a video generation job."""
+    """Submit a video generation job (legacy endpoint)."""
+    return await _submit_generation_job(
+        request=request,
+        background_tasks=background_tasks,
+        pipeline=pipeline,
+        job_queue=job_queue,
+        settings=settings,
+    )
+
+
+async def _submit_generation_job(
+    request: GenerateRequest | TextToVideoRequest | ImageToVideoRequest,
+    background_tasks: BackgroundTasks,
+    pipeline: PipelineService,
+    job_queue: JobQueue,
+    settings: Settings,
+) -> GenerateResponse:
+    """Internal function to submit generation job."""
     # Check if model is loaded
     if not pipeline.is_loaded:
         raise HTTPException(
@@ -73,14 +149,15 @@ async def generate_video(
 
     # Create job
     job = job_queue.create_job(
-        callback_url=request.callback_url,
+        callback_url=getattr(request, 'callback_url', None),
         prompt=request.prompt,
         height=request.height,
         width=request.width,
         num_frames=request.num_frames,
         frame_rate=request.frame_rate,
         seed=request.seed,
-        enhance_prompt=request.enhance_prompt,
+        enhance_prompt=getattr(request, 'enhance_prompt', False),
+        has_images=len(getattr(request, 'images', [])) > 0,
     )
 
     # Generate output path
@@ -250,23 +327,17 @@ def _process_generation(
     job_queue: JobQueue,
     settings: Settings,
     output_path: Path,
-    request: GenerateRequest,
+    request: GenerateRequest | TextToVideoRequest | ImageToVideoRequest,
 ) -> None:
     """Process video generation in background."""
     try:
         # Update job status
         job_queue.update_job(job.job_id, status="processing")
 
-        # Convert image inputs
-        images = [
-            ImageConditioningInput(
-                path=img.path,
-                frame_idx=img.frame_idx,
-                strength=img.strength,
-                crf=img.crf,
-            )
-            for img in request.images
-        ]
+        # Convert image inputs to tuples for pipeline
+        images = []
+        for img in getattr(request, 'images', []):
+            images.append((img.path, img.frame_idx, img.strength, img.crf))
 
         # Generate video
         metadata = pipeline.generate_video(
@@ -278,7 +349,7 @@ def _process_generation(
             frame_rate=request.frame_rate,
             seed=request.seed,
             images=images if images else None,
-            enhance_prompt=request.enhance_prompt,
+            enhance_prompt=getattr(request, 'enhance_prompt', False),
         )
 
         # Update job with results
