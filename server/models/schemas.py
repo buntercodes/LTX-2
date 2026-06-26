@@ -33,26 +33,18 @@ class GenerateRequest(BaseModel):
     )
     height: int | None = Field(
         default=None, 
-        ge=64, 
-        le=1088,
         description="Video height (default: 1024 for two-stage, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
-        ge=64, 
-        le=1920,
         description="Video width (default: 1536 for two-stage, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
-        ge=9, 
-        le=321,
         description="Number of frames (must be 8k+1, default: 121)"
     )
     frame_rate: float | None = Field(
         default=None, 
-        ge=1.0, 
-        le=60.0,
         description="Frames per second (default: 24.0)"
     )
     seed: int | None = Field(
@@ -76,7 +68,9 @@ class GenerateRequest(BaseModel):
     @classmethod
     def validate_num_frames(cls, v: int | None) -> int | None:
         """Validate frame count follows 8k+1 format."""
-        if v is not None and (v - 1) % 8 != 0:
+        if v is None or v == 0:
+            return None
+        if (v - 1) % 8 != 0:
             raise ValueError(
                 f"num_frames must be 8k+1 format (e.g., 9, 17, 25, 33, ..., 121). Got: {v}"
             )
@@ -86,7 +80,9 @@ class GenerateRequest(BaseModel):
     @classmethod
     def validate_dimensions(cls, v: int | None) -> int | None:
         """Validate dimensions are divisible by 64."""
-        if v is not None and v % 64 != 0:
+        if v is None or v == 0:
+            return None
+        if v % 64 != 0:
             raise ValueError(f"Dimension must be divisible by 64. Got: {v}")
         return v
 
@@ -101,26 +97,18 @@ class TextToVideoRequest(BaseModel):
     )
     height: int | None = Field(
         default=None, 
-        ge=64, 
-        le=1088,
         description="Video height (default: 1024 for two-stage, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
-        ge=64, 
-        le=1920,
         description="Video width (default: 1536 for two-stage, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
-        ge=9, 
-        le=321,
         description="Number of frames (must be 8k+1, default: 121)"
     )
     frame_rate: float | None = Field(
         default=None, 
-        ge=1.0, 
-        le=60.0,
         description="Frames per second (default: 24.0)"
     )
     seed: int | None = Field(
@@ -140,7 +128,9 @@ class TextToVideoRequest(BaseModel):
     @classmethod
     def validate_num_frames(cls, v: int | None) -> int | None:
         """Validate frame count follows 8k+1 format."""
-        if v is not None and (v - 1) % 8 != 0:
+        if v is None or v == 0:
+            return None
+        if (v - 1) % 8 != 0:
             raise ValueError(
                 f"num_frames must be 8k+1 format (e.g., 9, 17, 25, 33, ..., 121). Got: {v}"
             )
@@ -150,7 +140,9 @@ class TextToVideoRequest(BaseModel):
     @classmethod
     def validate_dimensions(cls, v: int | None) -> int | None:
         """Validate dimensions are divisible by 64."""
-        if v is not None and v % 64 != 0:
+        if v is None or v == 0:
+            return None
+        if v % 64 != 0:
             raise ValueError(f"Dimension must be divisible by 64. Got: {v}")
         return v
 
@@ -170,26 +162,18 @@ class ImageToVideoRequest(BaseModel):
     )
     height: int | None = Field(
         default=None, 
-        ge=64, 
-        le=1088,
         description="Video height (default: 1024 for two-stage, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
-        ge=64, 
-        le=1920,
         description="Video width (default: 1536 for two-stage, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
-        ge=9, 
-        le=321,
         description="Number of frames (must be 8k+1, default: 121)"
     )
     frame_rate: float | None = Field(
         default=None, 
-        ge=1.0, 
-        le=60.0,
         description="Frames per second (default: 24.0)"
     )
     seed: int | None = Field(
@@ -209,7 +193,9 @@ class ImageToVideoRequest(BaseModel):
     @classmethod
     def validate_num_frames(cls, v: int | None) -> int | None:
         """Validate frame count follows 8k+1 format."""
-        if v is not None and (v - 1) % 8 != 0:
+        if v is None or v == 0:
+            return None
+        if (v - 1) % 8 != 0:
             raise ValueError(
                 f"num_frames must be 8k+1 format (e.g., 9, 17, 25, 33, ..., 121). Got: {v}"
             )
@@ -219,7 +205,9 @@ class ImageToVideoRequest(BaseModel):
     @classmethod
     def validate_dimensions(cls, v: int | None) -> int | None:
         """Validate dimensions are divisible by 64."""
-        if v is not None and v % 64 != 0:
+        if v is None or v == 0:
+            return None
+        if v % 64 != 0:
             raise ValueError(f"Dimension must be divisible by 64. Got: {v}")
         return v
 
