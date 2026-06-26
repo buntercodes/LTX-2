@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     )
 
     # Inference defaults
-    default_height: int = Field(default=512, ge=32, description="Default video height")
-    default_width: int = Field(default=768, ge=32, description="Default video width")
+    default_height: int = Field(default=512, ge=64, description="Default video height (must be multiple of 64)")
+    default_width: int = Field(default=768, ge=64, description="Default video width (must be multiple of 64)")
     default_num_frames: int = Field(default=121, ge=9, description="Default frame count")
     default_frame_rate: float = Field(default=24.0, ge=1.0, le=120.0, description="Default FPS")
     default_seed: int = Field(default=42, description="Default random seed")
@@ -56,8 +56,8 @@ class Settings(BaseSettings):
         ge=1, 
         description="Maximum concurrent video generation jobs"
     )
-    max_height: int = Field(default=1088, ge=32, description="Maximum video height")
-    max_width: int = Field(default=1920, ge=32, description="Maximum video width")
+    max_height: int = Field(default=1088, ge=64, description="Maximum video height (must be multiple of 64)")
+    max_width: int = Field(default=1920, ge=64, description="Maximum video width (must be multiple of 64)")
     max_num_frames: int = Field(default=321, ge=9, description="Maximum frame count")
 
     # File management

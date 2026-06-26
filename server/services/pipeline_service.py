@@ -134,9 +134,9 @@ class PipelineService:
         frame_rate = frame_rate or self.settings.default_frame_rate
         seed = seed if seed is not None else self.settings.default_seed
 
-        # Ensure dimensions are valid
-        height = (height // 32) * 32
-        width = (width // 32) * 32
+        # Ensure dimensions are valid (must be divisible by 64 for two-stage pipeline)
+        height = max(64, (height // 64) * 64)
+        width = max(64, (width // 64) * 64)
 
         # Use default tiling config if not provided
         if tiling_config is None:

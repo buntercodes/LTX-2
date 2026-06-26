@@ -33,15 +33,15 @@ class GenerateRequest(BaseModel):
     )
     height: int | None = Field(
         default=None, 
-        ge=32, 
+        ge=64, 
         le=1088,
-        description="Video height (default: 512)"
+        description="Video height (default: 512, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
-        ge=32, 
+        ge=64, 
         le=1920,
-        description="Video width (default: 768)"
+        description="Video width (default: 768, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
@@ -85,9 +85,9 @@ class GenerateRequest(BaseModel):
     @field_validator("height", "width")
     @classmethod
     def validate_dimensions(cls, v: int | None) -> int | None:
-        """Validate dimensions are divisible by 32."""
-        if v is not None and v % 32 != 0:
-            raise ValueError(f"Dimension must be divisible by 32. Got: {v}")
+        """Validate dimensions are divisible by 64."""
+        if v is not None and v % 64 != 0:
+            raise ValueError(f"Dimension must be divisible by 64. Got: {v}")
         return v
 
 
@@ -101,15 +101,15 @@ class TextToVideoRequest(BaseModel):
     )
     height: int | None = Field(
         default=None, 
-        ge=32, 
+        ge=64, 
         le=1088,
-        description="Video height (default: 512)"
+        description="Video height (default: 512, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
-        ge=32, 
+        ge=64, 
         le=1920,
-        description="Video width (default: 768)"
+        description="Video width (default: 768, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
@@ -149,9 +149,9 @@ class TextToVideoRequest(BaseModel):
     @field_validator("height", "width")
     @classmethod
     def validate_dimensions(cls, v: int | None) -> int | None:
-        """Validate dimensions are divisible by 32."""
-        if v is not None and v % 32 != 0:
-            raise ValueError(f"Dimension must be divisible by 32. Got: {v}")
+        """Validate dimensions are divisible by 64."""
+        if v is not None and v % 64 != 0:
+            raise ValueError(f"Dimension must be divisible by 64. Got: {v}")
         return v
 
 
@@ -170,15 +170,15 @@ class ImageToVideoRequest(BaseModel):
     )
     height: int | None = Field(
         default=None, 
-        ge=32, 
+        ge=64, 
         le=1088,
-        description="Video height (default: 512)"
+        description="Video height (default: 512, must be multiple of 64)"
     )
     width: int | None = Field(
         default=None, 
-        ge=32, 
+        ge=64, 
         le=1920,
-        description="Video width (default: 768)"
+        description="Video width (default: 768, must be multiple of 64)"
     )
     num_frames: int | None = Field(
         default=None, 
@@ -218,9 +218,9 @@ class ImageToVideoRequest(BaseModel):
     @field_validator("height", "width")
     @classmethod
     def validate_dimensions(cls, v: int | None) -> int | None:
-        """Validate dimensions are divisible by 32."""
-        if v is not None and v % 32 != 0:
-            raise ValueError(f"Dimension must be divisible by 32. Got: {v}")
+        """Validate dimensions are divisible by 64."""
+        if v is not None and v % 64 != 0:
+            raise ValueError(f"Dimension must be divisible by 64. Got: {v}")
         return v
 
 
