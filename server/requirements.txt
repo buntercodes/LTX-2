@@ -1,0 +1,22 @@
+# LTX-2 Inference Server Dependencies
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# Configuration
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# HTTP client (for webhooks)
+httpx>=0.26.0
+
+# Utilities
+aiofiles>=23.2.0
+
+# LTX-2 dependencies (install separately)
+# These should be installed via: uv sync --frozen
+# torch>=2.1.0
+# safetensors>=0.4.0
