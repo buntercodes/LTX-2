@@ -1,5 +1,7 @@
 """Configuration management for LTX-2 Inference Server."""
 
+from __future__ import annotations
+
 from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -116,7 +118,7 @@ class Settings(BaseSettings):
 
     @field_validator("quantization")
     @classmethod
-    validate_quantization(cls, v: str | None) -> str | None:
+    def validate_quantization(cls, v: str | None) -> str | None:
         """Validate quantization policy."""
         if v is not None and v not in ("fp8-cast", "fp8-scaled-mm"):
             raise ValueError(f"Invalid quantization: {v}. Must be fp8-cast or fp8-scaled-mm")
@@ -124,7 +126,7 @@ class Settings(BaseSettings):
 
     @field_validator("offload_mode")
     @classmethod
-    validate_offload_mode(cls, v: str) -> str:
+    def validate_offload_mode(cls, v: str) -> str:
         """Validate offload mode."""
         if v not in ("none", "cpu", "disk"):
             raise ValueError(f"Invalid offload mode: {v}. Must be none, cpu, or disk")
@@ -132,7 +134,7 @@ class Settings(BaseSettings):
 
     @field_validator("compile_mode")
     @classmethod
-    validate_compile_mode(cls, v: str) -> str:
+    def validate_compile_mode(cls, v: str) -> str:
         """Validate compile mode."""
         if v not in ("default", "reduce-overhead", "max-autotune"):
             raise ValueError(f"Invalid compile mode: {v}")

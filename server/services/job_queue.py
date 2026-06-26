@@ -1,5 +1,7 @@
 """Job queue service for async video generation."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import uuid

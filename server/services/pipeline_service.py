@@ -1,5 +1,7 @@
 """Pipeline service for LTX-2 Distilled inference."""
 
+from __future__ import annotations
+
 import logging
 import time
 from pathlib import Path
